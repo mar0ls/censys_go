@@ -4,7 +4,7 @@
 [![Docs](https://img.shields.io/badge/docs-generated-blueviolet?style=flat&logo=markdown)](docs/DOCUMENTATION.md)
 
 <div id="header" align="center">
-    <img src="https://giphy.com/gifs/big-bang-theory-howard-wolowitz-recognize-q15lIdQWBYs7K" width="200"/>
+    <img src="https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExcnlxcXUxaHhsa2J0N3ZranM2a3RxaXUyaWRpZW96bHoxY2poaXJ3bCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/q15lIdQWBYs7K/giphy.gif" width="200"/>
 </div>
 
 A user-friendly command-line interface for interacting with the Censys API, implemented in Go.
