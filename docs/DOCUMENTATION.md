@@ -1,13 +1,17 @@
 # Censys-Go — CLI Documentation
 
+<div id="header" align="center">
+    <img src="https://giphy.com/gifs/big-bang-theory-howard-wolowitz-recognize-q15lIdQWBYs7K" width="200"/>
+</div>
+
 ## Table of contents
 
 1. [Package overview](#package-overview)
 2. [Configuration](#configuration)
-3. [File handling & results](#file-handling-&-results)
+3. [File handling & results](#file-handling-results)
 4. [Utilities](#utilities)
 5. [Command handlers](#command-handlers)
-6. [Inne](#inne)
+6. [Other](#other)
 
 ---
 
@@ -172,7 +176,7 @@ handleCertificate handles certificate lookup by SHA-256 fingerprint.
 
 ---
 
-## Inne
+## Other
 
 | Function / Type | Description |
 |-----------------|-------------|

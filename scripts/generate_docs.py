@@ -7,6 +7,7 @@ declarations and writes them as Markdown — grouped by category, with a table
 of contents and summary tables, matching the project documentation style.
 """
 import re
+import unicodedata
 from pathlib import Path
 
 SRC = Path("main.go")
@@ -107,7 +108,6 @@ def parse_source(src_text: str):
 
 def group_blocks(blocks: list[dict]):
     """Return an ordered list of (category_title, [block, ...])."""
-    # Build lookup: name → block
     by_name = {b["name"]: b for b in blocks}
 
     used: set[str] = set()
@@ -119,12 +119,35 @@ def group_blocks(blocks: list[dict]):
             grouped.append((title, members))
             used.update(b["name"] for b in members)
 
-    # Anything not explicitly categorised
+    # Anything not explicitly categorised goes into "Other"
     remainder = [b for b in blocks if b["name"] not in used]
     if remainder:
-        grouped.append(("Inne", remainder))
+        grouped.append(("Other", remainder))  # was "Inne" — fixed
 
     return grouped
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def slugify(text: str) -> str:
+    """Convert a section title to a GitHub-flavoured Markdown anchor slug.
+
+    Handles Unicode by stripping diacritics, lowercasing, replacing spaces
+    with hyphens, and dropping everything that isn't alphanumeric or a hyphen.
+    Much more robust than a handful of manual .replace() calls.
+    """
+    # Normalise to NFD so accented chars decompose (é → e + combining accent)
+    nfd = unicodedata.normalize("NFD", text)
+    # Drop combining characters (the accent parts)
+    ascii_text = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    lower = ascii_text.lower()
+    # Replace spaces and & with hyphens
+    slug = re.sub(r"[\s&]+", "-", lower)
+    # Drop anything that isn't a letter, digit, or hyphen
+    slug = re.sub(r"[^a-z0-9\-]", "", slug)
+    # Collapse multiple hyphens
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return "#" + slug
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────
@@ -145,14 +168,16 @@ def render_md(pkg_comments: list[str], blocks: list[dict]):
     if pkg_comments:
         toc_entries.append(("Package overview", "#package-overview"))
     for title, _ in grouped:
-        anchor = "#" + title.lower().replace(" ", "-").replace("ó", "o").replace("ę", "e").replace("ł", "l")
-        toc_entries.append((title, anchor))
+        # was broken for non-ASCII
+        toc_entries.append((title, slugify(title)))  
 
     with OUT_FILE.open("w", encoding="utf-8") as f:
 
         # Header
         f.write("# Censys-Go — CLI Documentation\n\n")
-
+        f.write('<div id="header" align="center">\n')
+        f.write('    <img src="https://giphy.com/gifs/big-bang-theory-howard-wolowitz-recognize-q15lIdQWBYs7K" width="200"/>\n')
+        f.write('</div>\n\n')
         # Table of contents
         f.write("## Table of contents\n\n")
         for idx, (label, anchor) in enumerate(toc_entries, 1):
@@ -174,7 +199,6 @@ def render_md(pkg_comments: list[str], blocks: list[dict]):
             for b in members:
                 sig = _signature(b)
                 desc = b["comment"].splitlines()[0] if b["comment"] else "_No description provided._"
-                # Escape pipe characters in descriptions
                 desc = desc.replace("|", "\\|")
                 f.write(f"| `{sig}` | {desc} |\n")
             f.write("\n")

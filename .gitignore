@@ -1,0 +1,15 @@
+*.log
+.env
+.DS_Store
+node_modules/
+build/
+.vscode/
+
+censys_go
+censys_go.exe
+censys_go-*
+censys_go_bin*
+
+
+results/
+

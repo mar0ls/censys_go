@@ -3,6 +3,10 @@
 [![Go version](https://img.shields.io/badge/go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/doc/install)
 [![Docs](https://img.shields.io/badge/docs-generated-blueviolet?style=flat&logo=markdown)](docs/DOCUMENTATION.md)
 
+<div id="header" align="center">
+    <img src="https://giphy.com/gifs/big-bang-theory-howard-wolowitz-recognize-q15lIdQWBYs7K" width="200"/>
+</div>
+
 A user-friendly command-line interface for interacting with the Censys API, implemented in Go.
 It`s PoC how can you use censys-go-sdk from https://github.com/censys/censys-sdk-go (license: MIT)
 
