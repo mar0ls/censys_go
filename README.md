@@ -1,6 +1,6 @@
 # Censys-Go CLI
 
-[![Go version](https://img.shields.io/badge/go-1.20+-00ADD8?style=flat&logo=go)](https://golang.org/doc/install)
+[![Go version](https://img.shields.io/badge/go-1.25%2B-00ADD8?style=flat&logo=go)](https://golang.org/doc/install)
 [![Docs](https://img.shields.io/badge/docs-generated-blueviolet?style=flat&logo=markdown)](docs/DOCUMENTATION.md)
 
 <div id="header" align="center">
@@ -29,7 +29,7 @@ Censys-Go CLI provides interactive commands for searching and inspecting interne
 
 ## Requirements
 
-- Go 1.20 or newer
+- Go 1.25 or newer
 - Network access and a Censys account with an API token
 
 ## Installation

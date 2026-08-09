@@ -9,9 +9,11 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +26,7 @@ import (
 	censys "github.com/censys/censys-sdk-go"
 	"github.com/censys/censys-sdk-go/models/components"
 	"github.com/censys/censys-sdk-go/models/operations"
+	"github.com/censys/censys-sdk-go/models/sdkerrors"
 	sdktypes "github.com/censys/censys-sdk-go/types"
 )
 
@@ -35,7 +38,6 @@ type Config struct {
 
 // AppConfig contains runtime configuration for the CLI.
 type AppConfig struct {
-	BatchSize      int           // Number of hosts per batch for bulk operations
 	PageSize       int           // Page size for search requests
 	MaxRetries     int           // Maximum number of retry attempts for API calls
 	RequestTimeout time.Duration // Per-request timeout for API calls
@@ -46,6 +48,9 @@ const (
 	configDir = ".censys"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 // Log-level style prefixes for consistent console output.
 const (
 	prefixOK   = "[OK]"
@@ -55,7 +60,6 @@ const (
 )
 
 var defaultAppConfig = AppConfig{
-	BatchSize:      100,
 	PageSize:       50,
 	MaxRetries:     3,
 	RequestTimeout: 5 * time.Minute,
@@ -92,25 +96,7 @@ func getHomeDir() (string, error) {
 	if home := os.Getenv("USERPROFILE"); home != "" {
 		return home, nil
 	}
-	return "", fmt.Errorf("%s cannot determine the user's home directory", prefixErr)
-}
-
-// isPathWithin checks that child does not escape outside parent via path traversal.
-// Simple but effective guard against "../../../etc/passwd" style attacks.
-func isPathWithin(parent, child string) bool {
-	absParent, err := filepath.Abs(parent)
-	if err != nil {
-		return false
-	}
-	absChild, err := filepath.Abs(child)
-	if err != nil {
-		return false
-	}
-	rel, err := filepath.Rel(absParent, absChild)
-	if err != nil {
-		return false
-	}
-	return !strings.HasPrefix(rel, "..")
+	return "", errors.New("cannot determine the user's home directory")
 }
 
 // ensureResultsDir creates a "results" directory in the current working directory
@@ -118,11 +104,11 @@ func isPathWithin(parent, child string) bool {
 func ensureResultsDir() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("%s unable to get current working directory: %w", prefixErr, err)
+		return "", fmt.Errorf("unable to get current working directory: %w", err)
 	}
 	resultsPath := filepath.Join(dir, "results")
 	if err := os.MkdirAll(resultsPath, 0700); err != nil {
-		return "", fmt.Errorf("%s unable to create results directory: %w", prefixWarn, err)
+		return "", fmt.Errorf("unable to create results directory: %w", err)
 	}
 	return resultsPath, nil
 }
@@ -136,10 +122,10 @@ func saveJSON(filename string, data interface{}) error {
 	path := filepath.Join(resultsDir, filename)
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("%s unable to serialize data to JSON: %w", prefixWarn, err)
+		return fmt.Errorf("unable to serialize data to JSON: %w", err)
 	}
 	if err := os.WriteFile(path, jsonData, 0600); err != nil {
-		return fmt.Errorf("%s unable to write file: %w", prefixWarn, err)
+		return fmt.Errorf("unable to write file: %w", err)
 	}
 	fmt.Printf("%s Saved %s\n", prefixOK, path)
 	return nil
@@ -214,21 +200,16 @@ func printResultSummary(data interface{}, prefix string) {
 func loadConfig() (Config, error) {
 	homeDir, err := getHomeDir()
 	if err != nil {
-		return Config{}, fmt.Errorf("%s error getting home directory: %w", prefixWarn, err)
+		return Config{}, fmt.Errorf("error getting home directory: %w", err)
 	}
 	configPath := filepath.Join(homeDir, configDir, "config.json")
-	configDirPath := filepath.Join(homeDir, configDir)
-	if !isPathWithin(configDirPath, configPath) {
-		return Config{}, fmt.Errorf("%s invalid configuration path: %s", prefixWarn, configPath)
-	}
-	// #nosec G304
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) // #nosec G304 -- path is derived from the user's own home directory
 	if err != nil {
-		return Config{}, fmt.Errorf("%s unable to read configuration file: %w", prefixWarn, err)
+		return Config{}, fmt.Errorf("unable to read configuration file: %w", err)
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("%s JSON parsing error: %w", prefixWarn, err)
+		return Config{}, fmt.Errorf("parsing %s: %w", configPath, err)
 	}
 	return cfg, nil
 }
@@ -236,29 +217,29 @@ func loadConfig() (Config, error) {
 func saveConfig(cfg Config) error {
 	homeDir, err := getHomeDir()
 	if err != nil {
-		return fmt.Errorf("%s error getting home directory: %w", prefixWarn, err)
+		return fmt.Errorf("error getting home directory: %w", err)
 	}
 	configDirPath := filepath.Join(homeDir, configDir)
 	if err := os.MkdirAll(configDirPath, 0700); err != nil {
-		return fmt.Errorf("%s unable to create configuration directory: %w", prefixWarn, err)
+		return fmt.Errorf("unable to create configuration directory: %w", err)
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("%s unable to serialize configuration: %w", prefixWarn, err)
+		return fmt.Errorf("unable to serialize configuration: %w", err)
 	}
 	configPath := filepath.Join(configDirPath, "config.json")
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
-		return fmt.Errorf("%s unable to write configuration: %w", prefixWarn, err)
+		return fmt.Errorf("unable to write configuration: %w", err)
 	}
 	return nil
 }
 
 func validateConfig(cfg Config) error {
 	if cfg.OrgID == "" {
-		return fmt.Errorf("%s Organization ID cannot be empty", prefixWarn)
+		return errors.New("organization ID cannot be empty")
 	}
 	if cfg.Token == "" {
-		return fmt.Errorf("%s Bearer Token cannot be empty", prefixWarn)
+		return errors.New("bearer token cannot be empty")
 	}
 	return nil
 }
@@ -334,40 +315,66 @@ func createClient(cfg Config) *censys.SDK {
 	)
 }
 
-// retryAPICall wraps an API call with retry logic using linear backoff.
-// Auth errors are not retried — no point hammering the API with bad credentials.
-func retryAPICall(maxRetries int, retryDelay time.Duration, operation string, fn func() error) error {
+// retryAPICall wraps an API call with retry logic using linear backoff. The wait
+// between attempts is interruptible, so a cancelled ctx aborts immediately instead
+// of sleeping through the remaining attempts.
+func retryAPICall(ctx context.Context, maxRetries int, retryDelay time.Duration, operation string, fn func() error) error {
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		err := fn()
 		if err == nil {
 			return nil
 		}
-		if isAuthError(err) {
+		if !isRetryable(err) {
 			return err
 		}
 		lastErr = err
-		if attempt < maxRetries {
-			fmt.Printf("%s Attempt %d/%d failed for %s: %v. Retrying in %v...\n",
-				prefixWarn, attempt, maxRetries, operation, err, retryDelay)
-			time.Sleep(retryDelay * time.Duration(attempt))
+		if attempt == maxRetries {
+			break
+		}
+		wait := retryDelay * time.Duration(attempt)
+		fmt.Printf("%s Attempt %d/%d failed for %s: %v. Retrying in %v...\n",
+			prefixWarn, attempt, maxRetries, operation, err, wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("%s: %w", operation, ctx.Err())
+		case <-timer.C:
 		}
 	}
 	return fmt.Errorf("operation %s failed after %d attempts: %w", operation, maxRetries, lastErr)
 }
 
-// isAuthError checks whether the error looks like a 401/auth failure.
-// The SDK doesn't expose typed errors, so we resort to string matching.
-func isAuthError(err error) bool {
+// isRetryable reports whether retrying err has any chance of succeeding.
+// Client-side faults (bad query, unknown host, bad credentials) are permanent;
+// retrying them only wastes time and, for metered endpoints, credits.
+func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "401") ||
-		strings.Contains(s, "unauthor") ||
-		strings.Contains(s, "invalid token") ||
-		strings.Contains(s, "access token") ||
-		strings.Contains(s, "invalid credentials")
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var authErr *sdkerrors.AuthenticationError
+	if errors.As(err, &authErr) {
+		return false
+	}
+	var model *sdkerrors.ErrorModel
+	if errors.As(err, &model) && model.Status != nil {
+		return retryableStatus(int(*model.Status))
+	}
+	var sdkErr *sdkerrors.SDKError
+	if errors.As(err, &sdkErr) {
+		return retryableStatus(sdkErr.StatusCode)
+	}
+	// Transport-level failure with no HTTP status attached — worth another go.
+	return true
+}
+
+// retryableStatus treats 429 and 5xx as transient; every other 4xx is permanent.
+func retryableStatus(code int) bool {
+	return code == http.StatusTooManyRequests || code >= 500
 }
 
 // showCredits fetches and prints credit balance and the last 30 days of usage.
@@ -378,7 +385,7 @@ func showCredits(client *censys.SDK, appCfg AppConfig, orgID string) error {
 	fmt.Println("\n=== Credits and Usage ===")
 
 	var creditsResp *operations.V3AccountmanagementOrgCreditsResponse
-	err := retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "fetching credits", func() error {
+	err := retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "fetching credits", func() error {
 		resp, err := client.AccountManagement.GetOrganizationCredits(ctx,
 			operations.V3AccountmanagementOrgCreditsRequest{OrganizationID: orgID})
 		if err != nil {
@@ -388,7 +395,7 @@ func showCredits(client *censys.SDK, appCfg AppConfig, orgID string) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("%s unable to fetch credits information: %w", prefixErr, err)
+		return fmt.Errorf("unable to fetch credits information: %w", err)
 	}
 
 	if creditsResp != nil {
@@ -404,11 +411,11 @@ func showCredits(client *censys.SDK, appCfg AppConfig, orgID string) error {
 	startDate := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	d, derr := sdktypes.NewDateFromString(startDate)
 	if derr != nil {
-		return fmt.Errorf("%s invalid start date: %w", prefixWarn, derr)
+		return fmt.Errorf("invalid start date: %w", derr)
 	}
 
 	var usageResp *operations.V3AccountmanagementOrgCreditsUsageResponse
-	err = retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "fetching usage", func() error {
+	err = retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "fetching usage", func() error {
 		resp, err := client.AccountManagement.GetOrganizationCreditUsage(ctx,
 			operations.V3AccountmanagementOrgCreditsUsageRequest{
 				OrganizationID: orgID,
@@ -422,7 +429,7 @@ func showCredits(client *censys.SDK, appCfg AppConfig, orgID string) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("%s unable to fetch usage information: %w", prefixErr, err)
+		return fmt.Errorf("unable to fetch usage information: %w", err)
 	}
 
 	if usageResp != nil {
@@ -507,10 +514,10 @@ func printUsageSummary(parsed map[string]interface{}) {
 func validateIP(ip string) error {
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
-		return fmt.Errorf("%s IP address cannot be empty", prefixWarn)
+		return errors.New("IP address cannot be empty")
 	}
 	if net.ParseIP(ip) == nil {
-		return fmt.Errorf("%s invalid IP address: %s", prefixWarn, ip)
+		return fmt.Errorf("invalid IP address: %s", ip)
 	}
 	return nil
 }
@@ -534,7 +541,7 @@ func readLinesFromStdin() ([]string, error) {
 		fmt.Printf("%s Added: %s (total: %d)\n", prefixOK, line, len(lines))
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("%s error reading from stdin: %w", prefixWarn, err)
+		return nil, fmt.Errorf("error reading from stdin: %w", err)
 	}
 	return lines, nil
 }
@@ -608,13 +615,13 @@ func getIPsFromUser() ([]string, error) {
 			ips = append(ips, line)
 		}
 		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("%s error reading file: %w", prefixErr, err)
+			return nil, fmt.Errorf("error reading file: %w", err)
 		}
 		fmt.Printf("%s Loaded %d IP addresses from file\n", prefixOK, len(ips))
 	}
 
 	if len(ips) == 0 {
-		return nil, fmt.Errorf("%s no valid IP addresses provided", prefixErr)
+		return nil, errors.New("no valid IP addresses provided")
 	}
 	return ips, nil
 }
@@ -629,6 +636,21 @@ func parsePositiveInt(s string, fieldName string) (int64, error) {
 		return 0, fmt.Errorf("%s must be a positive number", fieldName)
 	}
 	return value, nil
+}
+
+// dedupIPs removes duplicates while preserving input order. Every duplicate that
+// reaches Bulk View is a wasted credit, so this runs on every path into it.
+func dedupIPs(ips []string) []string {
+	seen := make(map[string]struct{}, len(ips))
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if _, dup := seen[ip]; dup {
+			continue
+		}
+		seen[ip] = struct{}{}
+		out = append(out, ip)
+	}
+	return out
 }
 
 // extractIPsFromHits extracts unique IP addresses from Search results.
@@ -684,6 +706,8 @@ func extractIPFromHit(m map[string]interface{}) string {
 // bulkViewIPs fetches full data for a list of IPs via sequential GetHost calls.
 // Each call costs 1 credit, so the user is warned and must confirm before proceeding.
 func bulkViewIPs(client *censys.SDK, appCfg AppConfig, orgID string, ips []string) {
+	ips = dedupIPs(ips)
+
 	fmt.Printf("\n%s Estimated cost: %d credits (1 credit per host)\n", prefixInfo, len(ips))
 	fmt.Printf("%s Continue with Bulk View? [y/N]: ", prefixInfo)
 
@@ -695,7 +719,7 @@ func bulkViewIPs(client *censys.SDK, appCfg AppConfig, orgID string, ips []strin
 	}
 
 	if err := showCredits(client, appCfg, orgID); err != nil {
-		fmt.Printf("%s unable to fetch credits information: %v\n", prefixWarn, err)
+		fmt.Printf("%s %v\n", prefixWarn, err)
 	}
 
 	hostMap := make(map[string]interface{})
@@ -711,14 +735,13 @@ func bulkViewIPs(client *censys.SDK, appCfg AppConfig, orgID string, ips []strin
 		progressbar.OptionSetItsString("IP"),
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), appCfg.RequestTimeout)
-	defer cancel()
-
-	for _, ip := range ips {
-		currentIP := ip
+	for _, currentIP := range ips {
 		var hostResp *operations.V3GlobaldataAssetHostResponse
 
-		err := retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay,
+		// The timeout budget is per host, not for the whole run — otherwise a long
+		// list would start failing the moment the first deadline elapsed.
+		ctx, cancel := context.WithTimeout(context.Background(), appCfg.RequestTimeout)
+		err := retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay,
 			fmt.Sprintf("host %s", currentIP), func() error {
 				resp, err := client.GlobalData.GetHost(ctx,
 					operations.V3GlobaldataAssetHostRequest{HostID: currentIP})
@@ -728,6 +751,7 @@ func bulkViewIPs(client *censys.SDK, appCfg AppConfig, orgID string, ips []strin
 				hostResp = resp
 				return nil
 			})
+		cancel()
 
 		if err != nil {
 			fmt.Printf("\n%s Error for %s: %v\n", prefixErr, currentIP, err)
@@ -774,8 +798,8 @@ func bulkViewIPs(client *censys.SDK, appCfg AppConfig, orgID string, ips []strin
 // The SDK wraps responses in a named envelope struct; we just want the inner result.
 func extractResultFromParsed(parsed map[string]interface{}) interface{} {
 	searchKeys := []string{
-		"ResponseEnvelopeAssetHostResponse",
-		"ResponseEnvelopeAssetHost",
+		"ResponseEnvelopeHostAsset",
+		"ResponseEnvelopeListHostAsset",
 	}
 	for _, key := range searchKeys {
 		if envelope, ok := parsed[key].(map[string]interface{}); ok {
@@ -823,13 +847,13 @@ func handleSearch(client *censys.SDK, appCfg AppConfig, orgID string) {
 
 	fmt.Println(" [...] Searching...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), appCfg.RequestTimeout)
-	defer cancel()
-
 	for {
 		var searchResp *operations.V3GlobaldataSearchQueryResponse
 
-		err := retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "search", func() error {
+		// One timeout budget per page, so fetching all pages of a large result
+		// set cannot trip a single deadline shared by the whole loop.
+		ctx, cancel := context.WithTimeout(context.Background(), appCfg.RequestTimeout)
+		err := retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "search", func() error {
 			var pageToken *string
 			if cursor != "" {
 				pageToken = censys.Pointer(cursor)
@@ -849,6 +873,7 @@ func handleSearch(client *censys.SDK, appCfg AppConfig, orgID string) {
 			searchResp = resp
 			return nil
 		})
+		cancel()
 
 		if err != nil {
 			fmt.Printf("%s Error during search: %v\n", prefixErr, err)
@@ -861,31 +886,15 @@ func handleSearch(client *censys.SDK, appCfg AppConfig, orgID string) {
 			break
 		}
 
-		hits := resp.GetResult().GetHits()
-		fmt.Printf("  Retrieved %d results (total %d)\n", len(hits), len(allHits)+len(hits))
+		result := resp.GetResult()
+		hits := result.GetHits()
+		fmt.Printf("  Retrieved %d results (total %d of %.0f matching)\n",
+			len(hits), len(allHits)+len(hits), result.GetTotalHits())
 		for _, h := range hits {
 			allHits = append(allHits, h)
 		}
 
-		// Resolve next page token — the SDK can return it as string or *string.
-		var next string
-		nextTok := resp.GetResult().GetNextPageToken()
-		switch v := any(nextTok).(type) {
-		case string:
-			next = v
-		case *string:
-			if v != nil {
-				next = *v
-			}
-		default:
-			next = fmt.Sprintf("%v", v)
-		}
-		if next != "" && next != "<nil>" {
-			cursor = next
-		} else {
-			cursor = ""
-		}
-
+		cursor = result.GetNextPageToken()
 		if !fetchAllPages || cursor == "" {
 			break
 		}
@@ -941,7 +950,7 @@ func handleSingleView(client *censys.SDK, appCfg AppConfig) {
 	defer cancel()
 
 	var hostResp *operations.V3GlobaldataAssetHostResponse
-	err = retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "fetching host", func() error {
+	err = retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "fetching host", func() error {
 		resp, err := client.GlobalData.GetHost(ctx,
 			operations.V3GlobaldataAssetHostRequest{HostID: ip})
 		if err != nil {
@@ -1030,7 +1039,7 @@ func handleAggregate(client *censys.SDK, appCfg AppConfig) {
 	defer cancel()
 
 	var aggregateResp *operations.V3GlobaldataSearchAggregateResponse
-	err = retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "aggregate", func() error {
+	err = retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "aggregate", func() error {
 		req := operations.V3GlobaldataSearchAggregateRequest{
 			SearchAggregateInputBody: components.SearchAggregateInputBody{
 				Query:           query,
@@ -1089,7 +1098,7 @@ func handleCertificate(client *censys.SDK, appCfg AppConfig) {
 	defer cancel()
 
 	var certResp *operations.V3GlobaldataAssetCertificateResponse
-	err = retryAPICall(appCfg.MaxRetries, appCfg.RetryDelay, "fetching certificate", func() error {
+	err = retryAPICall(ctx, appCfg.MaxRetries, appCfg.RetryDelay, "fetching certificate", func() error {
 		resp, err := client.GlobalData.GetCertificate(ctx,
 			operations.V3GlobaldataAssetCertificateRequest{CertificateID: fingerprint})
 		if err != nil {
@@ -1113,7 +1122,7 @@ func handleCertificate(client *censys.SDK, appCfg AppConfig) {
 }
 
 func main() {
-	fmt.Println("=== Censys-Go CLI v1 ===")
+	fmt.Printf("=== Censys-Go CLI %s ===\n", version)
 
 	// Environment variables take precedence over saved config — useful for CI or Docker.
 	envOrg := strings.TrimSpace(os.Getenv("CENSYS_ORG"))
@@ -1159,7 +1168,7 @@ func main() {
 		switch choice {
 		case "0. Show credits and usage":
 			if err := showCredits(client, appCfg, cfg.OrgID); err != nil {
-				fmt.Printf("%s Error: %v\n", prefixErr, err)
+				fmt.Printf("%s %v\n", prefixErr, err)
 			}
 		case "1. Configure":
 			newCfg := interactiveConfig()

@@ -176,7 +176,7 @@ def render_md(pkg_comments: list[str], blocks: list[dict]):
         # Header
         f.write("# Censys-Go — CLI Documentation\n\n")
         f.write('<div id="header" align="center">\n')
-        f.write('    <img src="https://giphy.com/gifs/big-bang-theory-howard-wolowitz-recognize-q15lIdQWBYs7K" width="200"/>\n')
+        f.write('    <img src="https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExcnlxcXUxaHhsa2J0N3ZranM2a3RxaXUyaWRpZW96bHoxY2poaXJ3bCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/q15lIdQWBYs7K/giphy.gif" width="200"/>\n')
         f.write('</div>\n\n')
         # Table of contents
         f.write("## Table of contents\n\n")

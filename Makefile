@@ -1,44 +1,53 @@
-BINARY_NAME := censys_go_bin
-#VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
-LDFLAGS ?= -s -w
+BINARY_NAME := censys_go
+PKG         := .
+VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS     ?= -s -w -X main.version=$(VERSION)
 
-.PHONY: all build clean run test linux macos windows linux-arm64 macos-arm64
+.PHONY: all build run test lint fmt vet check clean \
+        linux linux-arm64 macos macos-arm64 windows all-platforms
 
 all: build
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) .
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) $(PKG)
 
 run:
-	go run .
+	go run $(PKG)
 
 test:
-	go test ./...
+	go test -race -cover ./...
+
+lint:
+	golangci-lint run ./...
+
+fmt:
+	gofmt -l -w .
+
+vet:
+	go vet ./...
+
+# What CI runs; use before pushing.
+check: fmt vet lint test
 
 clean:
 	-@rm -f $(BINARY_NAME) $(BINARY_NAME)-* $(BINARY_NAME).exe
 
 # Linux
-linux: build-linux
+linux:
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-linux-amd64 $(PKG)
 
-build-linux:
-	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-linux-amd64 .
-
-linux-arm64: 
-	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-linux-arm64 .
+linux-arm64:
+	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-linux-arm64 $(PKG)
 
 # macOS
-macos: build-macos
-
-build-macos:
-	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-darwin-amd64 .
+macos:
+	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-darwin-amd64 $(PKG)
 
 macos-arm64:
-	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-darwin-arm64 .
+	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-darwin-arm64 $(PKG)
 
 # Windows
 windows:
-	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-windows-amd64.exe .
+	GOOS=windows GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME)-windows-amd64.exe $(PKG)
 
-# Convenience: build all major targets
 all-platforms: build linux linux-arm64 macos macos-arm64 windows
