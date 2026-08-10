@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/censys/censys-sdk-go/models/components"
 	"github.com/manifoldco/promptui"
 	"github.com/schollz/progressbar/v3"
 
@@ -266,10 +268,13 @@ func (u *UI) bulk(ctx context.Context) error {
 	return u.bulkFetch(ctx, targets)
 }
 
-// bulkFetch retrieves each host in turn, showing a progress bar on the message
-// stream. The operator confirms first because every host costs a credit.
+// bulkFetch retrieves hosts through the batch endpoint, showing a progress bar
+// on the message stream. The operator confirms first because every host costs a
+// credit whether or not Censys has a record for it.
 func (u *UI) bulkFetch(ctx context.Context, targets []string) error {
-	u.infof("%d hosts to fetch, 1 credit each", len(targets))
+	batches := (len(targets) + censysx.MaxBatchSize - 1) / censysx.MaxBatchSize
+	u.infof("%d hosts to fetch in %d request(s), 1 credit each", len(targets), batches)
+
 	proceed, err := u.confirm("Continue?", false)
 	if err != nil || !proceed {
 		u.infof("cancelled")
@@ -285,43 +290,108 @@ func (u *UI) bulkFetch(ctx context.Context, targets []string) error {
 	)
 
 	stream := u.stream()
-	fetched, failed := 0, 0
+	found, missing, err := u.client.HostsEach(ctx, targets, nil, func(host components.Host) error {
+		_ = bar.Add(1)
+		return stream.Host(censysx.NewHostRecord(&host))
+	})
+	if closeErr := stream.Close(); err == nil {
+		err = closeErr
+	}
+	u.printf("\n")
 
-	for _, target := range targets {
-		if err := ctx.Err(); err != nil {
-			u.warnf("interrupted after %d hosts; results so far are already written", fetched)
-			break
+	if errors.Is(err, context.Canceled) {
+		u.warnf("interrupted after %d hosts; what was fetched is already written", found)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	u.okf("%d hosts written, %d not present in Censys", found, missing)
+	return nil
+}
+
+// certHosts pivots from a certificate to every host observed serving it.
+func (u *UI) certHosts(ctx context.Context) error {
+	fingerprint, err := u.askRequired("Certificate SHA-256: ")
+	if err != nil {
+		return err
+	}
+	window, err := u.askInt("Look back how many days", 90)
+	if err != nil {
+		return err
+	}
+
+	stream := u.stream()
+	seen := map[string]struct{}{}
+
+	total, err := u.client.CertObservations(ctx, censysx.CertObservationParams{
+		Fingerprint: fingerprint,
+		Start:       time.Now().AddDate(0, 0, -window),
+	}, func(r components.HostObservationRange) error {
+		seen[r.IP] = struct{}{}
+		return stream.Value(map[string]any{
+			"ip":                 r.IP,
+			"port":               r.Port,
+			"transport_protocol": r.TransportProtocol,
+			"protocols":          r.Protocols,
+			"first_seen":         r.StartTime.Format(time.RFC3339),
+			"last_seen":          r.EndTime.Format(time.RFC3339),
+		})
+	})
+	if closeErr := stream.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+
+	u.okf("%d ranges across %d unique hosts (%d reported)", stream.Count(), len(seen), total)
+	if len(seen) > 0 {
+		fetch, err := u.confirm(fmt.Sprintf("Fetch full records for those %d hosts?", len(seen)), false)
+		if err != nil || !fetch {
+			return err
 		}
-
-		host, err := u.client.Host(ctx, target, nil)
-		if err != nil {
-			failed++
-			switch {
-			case censysx.IsNotFound(err):
-				u.warnf("%s: not present in Censys", target)
-			default:
-				u.warnf("%s: %s", target, censysx.Explain(err))
-			}
-			_ = bar.Add(1)
-			if censysx.IsAuth(err) {
-				break
-			}
-			continue
+		ips := make([]string, 0, len(seen))
+		for ip := range seen {
+			ips = append(ips, ip)
 		}
+		sort.Strings(ips)
+		return u.bulkFetch(ctx, ips)
+	}
+	return nil
+}
 
-		if err := stream.Host(censysx.NewHostRecord(host)); err != nil {
+// timeline shows how a host's exposed services changed over a window.
+func (u *UI) timeline(ctx context.Context) error {
+	host, err := u.askRequired("IP address: ")
+	if err != nil {
+		return err
+	}
+	window, err := u.askInt("Look back how many days", 30)
+	if err != nil {
+		return err
+	}
+
+	to := time.Now()
+	result, err := u.client.Timeline(ctx, host, to.AddDate(0, 0, -window), to)
+	if err != nil {
+		return err
+	}
+
+	stream := u.stream()
+	for _, event := range result.Events {
+		if err := stream.Value(event); err != nil {
 			_ = stream.Close()
 			return err
 		}
-		fetched++
-		_ = bar.Add(1)
 	}
-
 	if err := stream.Close(); err != nil {
 		return err
 	}
-	u.printf("\n")
-	u.okf("%d hosts written, %d failed", fetched, failed)
+
+	u.okf("%d events in the last %d days (scanned to %s)",
+		len(result.Events), window, result.ScannedTo.Format(time.RFC3339))
 	return nil
 }
 

@@ -98,6 +98,8 @@ func (u *UI) Run(ctx context.Context) error {
 		{"Bulk view hosts", u.bulk},
 		{"Aggregate", u.aggregate},
 		{"Certificate lookup", u.certificate},
+		{"Hosts serving a certificate (pivot)", u.certHosts},
+		{"Host timeline", u.timeline},
 		{"Output format", u.chooseFormat},
 		{"Configure credentials", u.configure},
 	}

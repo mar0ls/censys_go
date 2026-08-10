@@ -56,13 +56,28 @@ func mediaTypeFor(path string) string {
 	}
 }
 
-func hostBody(ip string) map[string]any {
-	return map[string]any{"result": map[string]any{"resource": map[string]any{
+func hostResource(ip string) map[string]any {
+	return map[string]any{
 		"ip":                ip,
 		"autonomous_system": map[string]any{"asn": 64500, "name": "TEST-AS"},
 		"location":          map[string]any{"country": "Poland"},
 		"services":          []any{map[string]any{"port": 443, "protocol": "HTTP"}},
-	}}}
+	}
+}
+
+// hostBody is the single-host response, used by `host --no-batch`.
+func hostBody(ip string) map[string]any {
+	return map[string]any{"result": map[string]any{"resource": hostResource(ip)}}
+}
+
+// hostsBody is the batch response: hosts Censys does not know are absent rather
+// than reported as errors.
+func hostsBody(known ...string) map[string]any {
+	assets := make([]any, 0, len(known))
+	for _, ip := range known {
+		assets = append(assets, map[string]any{"resource": hostResource(ip)})
+	}
+	return map[string]any{"result": assets}
 }
 
 func searchBody(ips []string, nextToken string) map[string]any {
@@ -150,7 +165,7 @@ func TestSearchFollowsAllPagesWhenAsked(t *testing.T) {
 
 func TestHostReadsTargetsFromStdin(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.5": hostBody("198.51.100.5"),
+		"/v3/global/asset/host": hostsBody("198.51.100.5"),
 	})
 
 	stdout, stderr, err := runCLI(t, api, "198.51.100.5\n# comment\n\n", "host")
@@ -167,25 +182,28 @@ func TestHostReadsTargetsFromStdin(t *testing.T) {
 	}
 }
 
-func TestHostExpandsCIDRArgument(t *testing.T) {
+// A CIDR expands into targets, but they still travel in a single batch request.
+func TestHostExpandsCIDRArgumentIntoOneBatch(t *testing.T) {
 	api, paths := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/203.0.113.0": hostBody("203.0.113.0"),
-		"/v3/global/asset/host/203.0.113.1": hostBody("203.0.113.1"),
+		"/v3/global/asset/host": hostsBody("203.0.113.0", "203.0.113.1"),
 	})
 
-	_, stderr, err := runCLI(t, api, "", "host", "203.0.113.0/31")
+	stdout, stderr, err := runCLI(t, api, "", "host", "203.0.113.0/31")
 	if err != nil {
 		t.Fatalf("Run: %v\nstderr: %s", err, stderr)
 	}
-	if len(*paths) != 2 {
-		t.Errorf("made %d requests, want 2: %v", len(*paths), *paths)
+	if len(*paths) != 1 {
+		t.Errorf("made %d requests, want 1: %v", len(*paths), *paths)
+	}
+	if got := strings.Count(stdout, "\n"); got != 2 {
+		t.Errorf("wrote %d records, want 2:\n%s", got, stdout)
 	}
 }
 
-// One dead host must not abort the rest of the list.
-func TestHostContinuesPastNotFound(t *testing.T) {
+// Hosts the batch response omits are counted, not treated as failures.
+func TestHostReportsAbsentHosts(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.2": hostBody("198.51.100.2"),
+		"/v3/global/asset/host": hostsBody("198.51.100.2"),
 	})
 
 	stdout, stderr, err := runCLI(t, api, "", "host", "198.51.100.1", "198.51.100.2")
@@ -195,17 +213,35 @@ func TestHostContinuesPastNotFound(t *testing.T) {
 	if got := strings.Count(stdout, "\n"); got != 1 {
 		t.Errorf("wrote %d records, want 1:\n%s", got, stdout)
 	}
-	if !strings.Contains(stderr, "not present in Censys") {
-		t.Errorf("stderr missing the not-found note:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "1 hosts written, 1 failed") {
+	if !strings.Contains(stderr, "1 hosts written, 1 not present in Censys") {
 		t.Errorf("stderr missing the tally:\n%s", stderr)
+	}
+}
+
+// --no-batch trades round trips for per-host error reporting.
+func TestHostNoBatchNamesTheFailingHost(t *testing.T) {
+	api, paths := stubAPI(t, map[string]any{
+		"/v3/global/asset/host/198.51.100.2": hostBody("198.51.100.2"),
+	})
+
+	stdout, stderr, err := runCLI(t, api, "", "host", "198.51.100.1", "198.51.100.2", "--no-batch")
+	if err != nil {
+		t.Fatalf("Run: %v\nstderr: %s", err, stderr)
+	}
+	if len(*paths) != 2 {
+		t.Errorf("made %d requests, want 2: %v", len(*paths), *paths)
+	}
+	if got := strings.Count(stdout, "\n"); got != 1 {
+		t.Errorf("wrote %d records, want 1:\n%s", got, stdout)
+	}
+	if !strings.Contains(stderr, "198.51.100.1: not present in Censys") {
+		t.Errorf("stderr should name the missing host:\n%s", stderr)
 	}
 }
 
 func TestFormatCSV(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.5": hostBody("198.51.100.5"),
+		"/v3/global/asset/host": hostsBody("198.51.100.5"),
 	})
 
 	stdout, stderr, err := runCLI(t, api, "", "host", "198.51.100.5", "--format", "csv")
@@ -224,7 +260,7 @@ func TestFormatCSV(t *testing.T) {
 
 func TestOutputFlagWritesToFile(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.5": hostBody("198.51.100.5"),
+		"/v3/global/asset/host": hostsBody("198.51.100.5"),
 	})
 	path := filepath.Join(t.TempDir(), "hits.ndjson")
 
@@ -247,7 +283,7 @@ func TestOutputFlagWritesToFile(t *testing.T) {
 
 func TestQuietSilencesStderrButKeepsResults(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.5": hostBody("198.51.100.5"),
+		"/v3/global/asset/host": hostsBody("198.51.100.5"),
 	})
 
 	stdout, stderr, err := runCLI(t, api, "", "host", "198.51.100.5", "--quiet")
@@ -279,6 +315,74 @@ func TestAggregateStreamsBuckets(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"key":"443"`) {
 		t.Errorf("stdout missing bucket key:\n%s", stdout)
+	}
+}
+
+func TestCertHostsStreamsObservationRanges(t *testing.T) {
+	fingerprint := strings.Repeat("ab", 32)
+	api, _ := stubAPI(t, map[string]any{
+		"/v3/threat-hunting/certificate/" + fingerprint + "/observations/hosts": map[string]any{"result": map[string]any{
+			"ranges": []any{
+				map[string]any{
+					"ip": "198.51.100.1", "port": 443, "protocols": []string{"HTTP"},
+					"transport_protocol": "tcp",
+					"start_time":         "2026-01-01T00:00:00Z", "end_time": "2026-02-01T00:00:00Z",
+				},
+				map[string]any{
+					"ip": "198.51.100.1", "port": 8443, "protocols": []string{"HTTP"},
+					"transport_protocol": "tcp",
+					"start_time":         "2026-01-01T00:00:00Z", "end_time": "2026-02-01T00:00:00Z",
+				},
+			},
+			"total_results": 2,
+		}},
+	})
+
+	stdout, stderr, err := runCLI(t, api, "", "cert-hosts", fingerprint)
+	if err != nil {
+		t.Fatalf("Run: %v\nstderr: %s", err, stderr)
+	}
+
+	var first map[string]any
+	line := strings.SplitN(strings.TrimSpace(stdout), "\n", 2)[0]
+	if err := json.Unmarshal([]byte(line), &first); err != nil {
+		t.Fatalf("stdout is not JSON: %v (%q)", err, line)
+	}
+	if first["ip"] != "198.51.100.1" || first["first_seen"] != "2026-01-01T00:00:00Z" {
+		t.Errorf("record = %v", first)
+	}
+	// Two ranges on one host: the summary must not double-count the host.
+	if !strings.Contains(stderr, "2 observation ranges across 1 unique hosts") {
+		t.Errorf("stderr summary wrong:\n%s", stderr)
+	}
+}
+
+func TestTimelineUsesTheRequestedWindow(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/vnd.censys.api.v3.host_timeline_event.v1+json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+			"events": []any{map[string]any{"resource": map[string]any{
+				"event_time":      "2026-03-04T00:00:00Z",
+				"service_scanned": map[string]any{"port": 9001},
+			}}},
+			"scanned_to": "2026-08-01T00:00:00Z",
+		}})
+	}))
+	t.Cleanup(srv.Close)
+
+	stdout, stderr, err := runCLI(t, srv.URL, "", "timeline", "198.51.100.1",
+		"--since", "2026-01-01", "--until", "2026-06-01")
+	if err != nil {
+		t.Fatalf("Run: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "service_scanned") {
+		t.Errorf("stdout missing the event:\n%s", stdout)
+	}
+	// The API's start_time is the instant nearest to now.
+	if !strings.Contains(query, "start_time=2026-06-01") || !strings.Contains(query, "end_time=2026-01-01") {
+		t.Errorf("window sent as %q", query)
 	}
 }
 
@@ -317,7 +421,7 @@ func TestUsageErrors(t *testing.T) {
 
 func TestGlobalFlagBeforeCommandIsKept(t *testing.T) {
 	api, _ := stubAPI(t, map[string]any{
-		"/v3/global/asset/host/198.51.100.5": hostBody("198.51.100.5"),
+		"/v3/global/asset/host": hostsBody("198.51.100.5"),
 	})
 
 	stdout, stderr, err := runCLI(t, api, "", "--format", "csv", "host", "198.51.100.5")

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/censys/censys-sdk-go/models/components"
+
 	"github.com/mar0ls/censys_go/internal/censysx"
 	"github.com/mar0ls/censys_go/internal/config"
 	"github.com/mar0ls/censys_go/internal/hunt"
@@ -26,6 +28,11 @@ func commands() []command {
 		inputFile string
 		atTime    string
 		days      int
+		since     string
+		until     string
+		port      int
+		protocol  string
+		noBatch   bool
 	)
 
 	return []command{
@@ -63,6 +70,7 @@ func commands() []command {
 			register: func(fs *flag.FlagSet) {
 				fs.StringVar(&inputFile, "f", "", "read targets from a file, one per line")
 				fs.StringVar(&atTime, "at", "", "snapshot time as RFC3339, for a historical view")
+				fs.BoolVar(&noBatch, "no-batch", false, "fetch one host per request instead of in batches")
 			},
 			run: func(ctx context.Context, s *session, args []string) error {
 				targets, err := collectTargets(s, args, inputFile)
@@ -73,7 +81,90 @@ func commands() []command {
 				if err != nil {
 					return err
 				}
+				if noBatch {
+					return runHostsOneByOne(ctx, s, targets, at)
+				}
 				return runHosts(ctx, s, targets, at)
+			},
+		},
+		{
+			name:    "cert-hosts",
+			args:    "SHA256 [--since D] [--until D] [--port N]",
+			summary: "list every host observed serving a certificate, including ones now dark",
+			register: func(fs *flag.FlagSet) {
+				fs.StringVar(&since, "since", "", "only ranges ending at or after this time")
+				fs.StringVar(&until, "until", "", "only ranges starting at or before this time")
+				fs.IntVar(&port, "port", 0, "restrict to one port")
+				fs.StringVar(&protocol, "protocol", "", "restrict to one transport protocol")
+			},
+			run: func(ctx context.Context, s *session, args []string) error {
+				if len(args) != 1 {
+					return fmt.Errorf("%w: cert-hosts takes exactly one fingerprint", ErrUsage)
+				}
+				start, err := parseAtTime(since)
+				if err != nil {
+					return err
+				}
+				end, err := parseAtTime(until)
+				if err != nil {
+					return err
+				}
+				return runCertHosts(ctx, s, censysx.CertObservationParams{
+					Fingerprint: args[0],
+					Start:       valueOrZero(start),
+					End:         valueOrZero(end),
+					Port:        port,
+					Protocol:    protocol,
+				})
+			},
+		},
+		{
+			name:    "timeline",
+			args:    "IP [--since D] [--until D]",
+			summary: "show a host's service and certificate changes over a window",
+			register: func(fs *flag.FlagSet) {
+				fs.StringVar(&since, "since", "", "window start, RFC3339 or YYYY-MM-DD (default 30 days ago)")
+				fs.StringVar(&until, "until", "", "window end, RFC3339 or YYYY-MM-DD (default now)")
+			},
+			run: func(ctx context.Context, s *session, args []string) error {
+				if len(args) != 1 {
+					return fmt.Errorf("%w: timeline takes exactly one host", ErrUsage)
+				}
+				from, err := parseAtTime(since)
+				if err != nil {
+					return err
+				}
+				to, err := parseAtTime(until)
+				if err != nil {
+					return err
+				}
+				now := time.Now()
+				if to == nil {
+					to = &now
+				}
+				if from == nil {
+					start := to.AddDate(0, 0, -30)
+					from = &start
+				}
+
+				timeline, err := s.client.Timeline(ctx, args[0], *from, *to)
+				if err != nil {
+					return err
+				}
+
+				stream := s.stream()
+				for _, event := range timeline.Events {
+					if err := stream.Value(event); err != nil {
+						_ = stream.Close()
+						return err
+					}
+				}
+				if err := stream.Close(); err != nil {
+					return err
+				}
+				s.okf("%d events between %s and %s", len(timeline.Events),
+					from.Format(time.RFC3339), to.Format(time.RFC3339))
+				return nil
 			},
 		},
 		{
@@ -223,10 +314,36 @@ func runSearch(ctx context.Context, s *session, params censysx.SearchParams, pag
 	return nil
 }
 
-// runHosts fetches each target in turn, reporting failures without abandoning
-// the rest of the list.
+// runHosts fetches targets through the batch endpoint, which costs one request
+// per hundred hosts instead of one per host.
 func runHosts(ctx context.Context, s *session, targets []string, at *time.Time) error {
-	s.infof("%d hosts to fetch, 1 credit each", len(targets))
+	batches := (len(targets) + censysx.MaxBatchSize - 1) / censysx.MaxBatchSize
+	s.infof("%d hosts to fetch in %d request(s), 1 credit each", len(targets), batches)
+
+	stream := s.stream()
+	found, missing, err := s.client.HostsEach(ctx, targets, at, func(host components.Host) error {
+		return stream.Host(censysx.NewHostRecord(&host))
+	})
+	if closeErr := stream.Close(); err == nil {
+		err = closeErr
+	}
+	if errors.Is(err, context.Canceled) {
+		s.warnf("interrupted after %d hosts", found)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	s.okf("%d hosts written, %d not present in Censys", found, missing)
+	return nil
+}
+
+// runHostsOneByOne fetches each target separately. It costs the same in credits
+// but many more round trips; its value is that a failure names the host that
+// caused it, which the batch endpoint cannot do.
+func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *time.Time) error {
+	s.infof("%d hosts to fetch, one request each, 1 credit each", len(targets))
 
 	stream := s.stream()
 	fetched, failed := 0, 0
@@ -265,6 +382,45 @@ func runHosts(ctx context.Context, s *session, targets []string, at *time.Time) 
 	}
 	s.okf("%d hosts written, %d failed", fetched, failed)
 	return nil
+}
+
+// runCertHosts streams the observation ranges for a certificate.
+func runCertHosts(ctx context.Context, s *session, p censysx.CertObservationParams) error {
+	stream := s.stream()
+	seen := map[string]struct{}{}
+
+	total, err := s.client.CertObservations(ctx, p, func(r components.HostObservationRange) error {
+		seen[r.IP] = struct{}{}
+		return stream.Value(map[string]any{
+			"ip":                 r.IP,
+			"port":               r.Port,
+			"transport_protocol": r.TransportProtocol,
+			"protocols":          r.Protocols,
+			"first_seen":         r.StartTime.Format(time.RFC3339),
+			"last_seen":          r.EndTime.Format(time.RFC3339),
+		})
+	})
+	if closeErr := stream.Close(); err == nil {
+		err = closeErr
+	}
+	if errors.Is(err, context.Canceled) {
+		s.warnf("interrupted after %d hosts", len(seen))
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	s.okf("%d observation ranges across %d unique hosts (%d reported)", stream.Count(), len(seen), total)
+	return nil
+}
+
+// valueOrZero dereferences an optional time, yielding the zero value for nil.
+func valueOrZero(t *time.Time) time.Time {
+	if t == nil {
+		return time.Time{}
+	}
+	return *t
 }
 
 // collectTargets gathers targets from arguments, a file, or stdin, in that order.
