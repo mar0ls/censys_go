@@ -56,8 +56,16 @@ func FormatNames() string {
 	return strings.Join(names, ", ")
 }
 
-// hostColumns is the column order for Table and CSV output.
+// hostColumns is the column order for host rows in Table and CSV output.
 var hostColumns = []string{"ip", "asn", "as_name", "country", "ports", "software", "cert_sha256", "jarm", "dns"}
+
+// Record is one result in both of the shapes the formats need: Doc for the JSON
+// encodings, Columns and Values for the tabular ones.
+type Record struct {
+	Columns []string
+	Values  []string
+	Doc     any
+}
 
 // Stream writes records incrementally in one format. Callers must call Close to
 // finish the document; for JSON and Table that is where the trailing structure
@@ -71,6 +79,10 @@ type Stream struct {
 	tab   *tabwriter.Writer
 	count int
 	err   error
+
+	// header is written on the first tabular record rather than up front, so
+	// the columns can come from whatever kind of record the caller emits.
+	header []string
 }
 
 // NewStream starts a stream in the given format.
@@ -80,38 +92,57 @@ func NewStream(w io.Writer, f Format) *Stream {
 	case NDJSON:
 		s.enc = json.NewEncoder(w)
 	case JSON:
-		s.enc = json.NewEncoder(w)
-		s.enc.SetIndent("  ", "  ")
 		s.write("[\n")
 	case CSV:
 		s.csv = csv.NewWriter(w)
-		s.err = s.csv.Write(hostColumns)
 	case Table:
 		s.tab = tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-		s.write(strings.ToUpper(strings.Join(hostColumns, "\t")) + "\n")
 	}
 	return s
 }
 
 // Host writes one host record.
 func (s *Stream) Host(rec censysx.HostRecord) error {
+	return s.Record(Record{Columns: hostColumns, Values: hostRow(rec), Doc: rec})
+}
+
+// Record writes one result. Tabular formats use Columns and Values, emitting the
+// header on the first record; the JSON formats use Doc.
+//
+// Once a stream has emitted a header, records with different columns fall back
+// to compact JSON in a single field, because a CSV cannot change shape midway.
+func (s *Stream) Record(r Record) error {
 	if s.err != nil {
 		return s.err
 	}
+
 	switch s.format {
-	case CSV:
-		s.err = s.csv.Write(hostRow(rec))
-	case Table:
-		s.write(strings.Join(hostRow(rec), "\t") + "\n")
+	case CSV, Table:
+		if len(r.Columns) == 0 {
+			return s.Value(r.Doc)
+		}
+		if s.header == nil {
+			s.header = r.Columns
+			// Upper case reads better in a terminal table, but a CSV header has
+			// to stay verbatim so downstream tools see the real field names.
+			if s.format == Table {
+				s.writeRow(upper(r.Columns))
+			} else {
+				s.writeRow(r.Columns)
+			}
+		} else if !sameColumns(s.header, r.Columns) {
+			return s.Value(r.Doc)
+		}
+		s.writeRow(r.Values)
+		s.count++
+		return s.err
 	default:
-		return s.Value(rec)
+		return s.Value(r.Doc)
 	}
-	s.count++
-	return s.err
 }
 
-// Value writes an arbitrary payload. In Table and CSV formats, which have a
-// fixed host-shaped schema, it falls back to compact JSON in a single column.
+// Value writes an arbitrary payload. In Table and CSV formats it falls back to
+// compact JSON in a single field, since such a value has no declared columns.
 func (s *Stream) Value(v any) error {
 	if s.err != nil {
 		return s.err
@@ -122,14 +153,24 @@ func (s *Stream) Value(v any) error {
 			s.write(",\n")
 		}
 		s.write("  ")
-		s.err = s.enc.Encode(v)
+		// Encode appends its own newline, which would double up against the
+		// separator written before the next element and before the closing
+		// bracket, so trim it back off.
+		var encoded []byte
+		encoded, s.err = json.MarshalIndent(v, "  ", "  ")
+		if s.err == nil {
+			s.write(string(encoded))
+		}
 	case NDJSON:
 		s.err = s.enc.Encode(v)
 	default:
 		var line []byte
 		line, s.err = json.Marshal(v)
 		if s.err == nil {
-			s.write(string(line) + "\n")
+			// Route this through the same writer the tabular rows use. The csv
+			// package buffers until Flush, so writing straight to s.w here would
+			// land the fallback ahead of rows emitted before it.
+			s.writeRow([]string{string(line)})
 		}
 	}
 	s.count++
@@ -158,6 +199,38 @@ func (s *Stream) Close() error {
 		}
 	}
 	return s.err
+}
+
+// writeRow emits one tabular row in whichever of CSV or Table is active.
+func (s *Stream) writeRow(values []string) {
+	if s.err != nil {
+		return
+	}
+	if s.format == CSV {
+		s.err = s.csv.Write(values)
+		return
+	}
+	s.write(strings.Join(values, "\t") + "\n")
+}
+
+func upper(columns []string) []string {
+	out := make([]string, len(columns))
+	for i, c := range columns {
+		out[i] = strings.ToUpper(c)
+	}
+	return out
+}
+
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // write appends to the active writer, remembering the first failure.

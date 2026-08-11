@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"io"
+	"net/url"
 	"reflect"
 	"testing"
 )
@@ -132,6 +135,34 @@ func TestPermuteRoundTripsThroughParse(t *testing.T) {
 	}
 	if want := []string{"1.2.3.4", "5.6.7.8"}; !reflect.DeepEqual(fs.Args(), want) {
 		t.Errorf("positional args = %v, want %v", fs.Args(), want)
+	}
+}
+
+// signal.NotifyContext attaches a cause, and net/http reports that cause rather
+// than context.Canceled, so an errors.Is check against context.Canceled misses
+// every request that failed in transit. Interrupted must not rely on it.
+func TestInterruptedDetectsCancellationThroughAWrappedCause(t *testing.T) {
+	cause := errors.New("interrupt signal received")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+
+	transportErr := &url.Error{Op: "Get", URL: "http://example.test", Err: cause}
+	if errors.Is(transportErr, context.Canceled) {
+		t.Fatal("premise broken: the transport error now unwraps to context.Canceled")
+	}
+	if !Interrupted(ctx, transportErr) {
+		t.Error("Interrupted() = false for an error raised while the context was cancelled")
+	}
+}
+
+func TestInterruptedIgnoresOrdinaryFailures(t *testing.T) {
+	if Interrupted(context.Background(), errors.New("connection refused")) {
+		t.Error("Interrupted() = true for a live context")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if Interrupted(ctx, nil) {
+		t.Error("Interrupted() = true without an error")
 	}
 }
 

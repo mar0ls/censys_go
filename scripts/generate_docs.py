@@ -1,236 +1,208 @@
 #!/usr/bin/env python3
 """
-Generate docs/DOCUMENTATION.md from comments in main.go.
+Generate docs/DOCUMENTATION.md from the doc comments in the Go sources.
 
-Extracts comment blocks (// ...) that immediately precede function and type
-declarations and writes them as Markdown — grouped by category, with a table
-of contents and summary tables, matching the project documentation style.
+Walks main.go and internal/**, extracts the comment block preceding each
+function, type, and package-level const/var declaration, and writes them as
+Markdown grouped by package. Test files are skipped.
+
+Run from the repository root:
+
+    python3 scripts/generate_docs.py
 """
+from __future__ import annotations
+
 import re
 import unicodedata
 from pathlib import Path
 
-SRC = Path("main.go")
-OUT_DIR = Path("docs")
-OUT_FILE = OUT_DIR / "DOCUMENTATION.md"
+ROOT = Path(".")
+OUT_FILE = Path("docs") / "DOCUMENTATION.md"
+HEADER_IMAGE = (
+    "https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExcnlxcXUxaHhsa2J0N3ZranM2a3RxaXUyaWRpZW96bHoxY2poaXJ3bCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/q15lIdQWBYs7K/giphy.gif"
+)
 
-# ── Category definitions ────────────────────────────────────────────────────
-# Each entry: (display title, list of function/type names that belong here).
-# Names listed here are matched case-sensitively against parsed identifiers.
-# Anything not matched falls into "Other".
-CATEGORIES = [
-    (
-        "Configuration",
-        ["Config", "AppConfig", "loadConfig", "saveConfig", "validateConfig",
-         "ensureConfig", "interactiveConfig", "createClient"],
-    ),
-    (
-        "File handling & results",
-        ["getHomeDir", "ensureResultsDir", "saveJSON", "askToSave"],
-    ),
-    (
-        "Utilities",
-        ["retryAPICall", "validateIP", "readLinesFromStdin", "getIPsFromUser",
-         "parsePositiveInt", "showCredits"],
-    ),
-    (
-        "Command handlers",
-        ["handleSearch", "handleSingleView", "handleBulkView",
-         "handleAggregate", "handleCertificate"],
-    ),
+# Package directories in the order they should appear. Anything else found on
+# disk is appended afterwards, so a new package shows up without editing this.
+PACKAGE_ORDER = [
+    ".",
+    "internal/cli",
+    "internal/censysx",
+    "internal/config",
+    "internal/render",
+    "internal/hunt",
+    "internal/ui",
 ]
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
 
-def parse_source(src_text: str):
-    """Return (package_comments, blocks).
+FUNC_RE = re.compile(r"^func\s*(?:\(\s*\w+\s+\*?(\w+)\s*\)\s*)?([A-Za-z_]\w*)")
+TYPE_RE = re.compile(r"^type\s+([A-Za-z_]\w*)")
+DECL_RE = re.compile(r"^(const|var)\s+(?:\(|([A-Za-z_]\w*))")
+PACKAGE_RE = re.compile(r"^package\s+(\w+)")
 
-    blocks is a list of dicts with keys: kind ('func'|'type'), name, comment.
-    """
-    lines = src_text.splitlines()
-    blocks = []
-    comment_buf: list[str] = []
-    package_comments: list[str] = []
-    saw_package = False
 
-    func_re = re.compile(r"^\s*func\s*(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)")
-    type_re = re.compile(r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)")
-    package_re = re.compile(r"^\s*package\s+\w+")
+def parse_file(path: Path) -> tuple[str, list[str], list[dict]]:
+    """Return (package name, package doc lines, declaration blocks)."""
+    package = ""
+    package_doc: list[str] = []
+    blocks: list[dict] = []
 
-    for line in lines:
-        stripped = line.lstrip()
+    comment: list[str] = []
+    seen_package = False
 
-        # Accumulate comment lines
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+
         if stripped.startswith("//"):
             text = stripped[2:]
-            if text.startswith(" "):
-                text = text[1:]
-            comment_buf.append(text)
+            comment.append(text[1:] if text.startswith(" ") else text)
             continue
 
-        # Package declaration — grab preceding comments as package-level doc
-        if not saw_package and package_re.match(line):
-            saw_package = True
-            if comment_buf:
-                package_comments = comment_buf[:]
-            comment_buf = []
+        # Only top-level declarations carry documentation worth extracting;
+        # anything indented is a struct field or a statement.
+        if line[:1].isspace() or not stripped:
+            if not stripped:
+                comment = []
             continue
 
-        # Function declaration
-        m = func_re.match(line)
-        if m:
+        match = PACKAGE_RE.match(stripped)
+        if match and not seen_package:
+            seen_package = True
+            package = match.group(1)
+            package_doc = comment[:]
+            comment = []
+            continue
+
+        match = FUNC_RE.match(stripped)
+        if match:
+            receiver, name = match.group(1), match.group(2)
             blocks.append({
                 "kind": "func",
-                "name": m.group(1),
-                "comment": "\n".join(comment_buf).strip(),
+                "name": f"{receiver}.{name}" if receiver else name,
+                "comment": "\n".join(comment).strip(),
             })
-            comment_buf = []
+            comment = []
             continue
 
-        # Type declaration
-        m = type_re.match(line)
-        if m:
-            blocks.append({
-                "kind": "type",
-                "name": m.group(1),
-                "comment": "\n".join(comment_buf).strip(),
-            })
-            comment_buf = []
+        match = TYPE_RE.match(stripped)
+        if match:
+            blocks.append({"kind": "type", "name": match.group(1), "comment": "\n".join(comment).strip()})
+            comment = []
             continue
 
-        # Any other non-comment line resets the buffer
-        comment_buf = []
+        match = DECL_RE.match(stripped)
+        if match:
+            name = match.group(2) or f"{match.group(1)} block"
+            blocks.append({"kind": match.group(1), "name": name, "comment": "\n".join(comment).strip()})
+            comment = []
+            continue
 
-    return package_comments, blocks
+        comment = []
 
-
-# ── Grouping ─────────────────────────────────────────────────────────────────
-
-def group_blocks(blocks: list[dict]):
-    """Return an ordered list of (category_title, [block, ...])."""
-    by_name = {b["name"]: b for b in blocks}
-
-    used: set[str] = set()
-    grouped = []
-
-    for title, names in CATEGORIES:
-        members = [by_name[n] for n in names if n in by_name]
-        if members:
-            grouped.append((title, members))
-            used.update(b["name"] for b in members)
-
-    # Anything not explicitly categorised goes into "Other"
-    remainder = [b for b in blocks if b["name"] not in used]
-    if remainder:
-        grouped.append(("Other", remainder))  # was "Inne" — fixed
-
-    return grouped
+    return package, package_doc, blocks
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def collect_packages() -> list[dict]:
+    """Return one entry per package directory that holds Go sources."""
+    directories = list(PACKAGE_ORDER)
+    for path in sorted(ROOT.glob("internal/*")):
+        key = path.as_posix()
+        if path.is_dir() and key not in directories:
+            directories.append(key)
+
+    packages = []
+    for directory in directories:
+        sources = sorted(
+            p for p in Path(directory).glob("*.go")
+            if not p.name.endswith("_test.go")
+        )
+        if not sources:
+            continue
+
+        name, doc, blocks = "", [], []
+        for source in sources:
+            pkg_name, pkg_doc, file_blocks = parse_file(source)
+            name = name or pkg_name
+            # The package comment lives on whichever file carries it.
+            doc = doc or pkg_doc
+            blocks.extend(file_blocks)
+
+        packages.append({
+            "name": name,
+            "path": directory,
+            "doc": doc,
+            "blocks": [b for b in blocks if b["comment"]],
+            "files": [p.as_posix() for p in sources],
+        })
+    return packages
+
+
+# ── Rendering ────────────────────────────────────────────────────────────────
 
 def slugify(text: str) -> str:
-    """Convert a section title to a GitHub-flavoured Markdown anchor slug.
-
-    Handles Unicode by stripping diacritics, lowercasing, replacing spaces
-    with hyphens, and dropping everything that isn't alphanumeric or a hyphen.
-    Much more robust than a handful of manual .replace() calls.
-    """
-    # Normalise to NFD so accented chars decompose (é → e + combining accent)
+    """Convert a heading to a GitHub-flavoured Markdown anchor."""
     nfd = unicodedata.normalize("NFD", text)
-    # Drop combining characters (the accent parts)
     ascii_text = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-    lower = ascii_text.lower()
-    # Replace spaces and & with hyphens
-    slug = re.sub(r"[\s&]+", "-", lower)
-    # Drop anything that isn't a letter, digit, or hyphen
+    slug = re.sub(r"[\s&/]+", "-", ascii_text.lower())
     slug = re.sub(r"[^a-z0-9\-]", "", slug)
-    # Collapse multiple hyphens
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return "#" + slug
+    return "#" + re.sub(r"-+", "-", slug).strip("-")
 
 
-# ── Rendering ─────────────────────────────────────────────────────────────────
-
-def _signature(block: dict) -> str:
-    """Return display name: 'TypeName' for types, 'funcName()' for funcs."""
-    if block["kind"] == "type":
-        return block["name"]
-    return f"{block['name']}()"
+def signature(block: dict) -> str:
+    return f"{block['name']}()" if block["kind"] == "func" else block["name"]
 
 
-def render_md(pkg_comments: list[str], blocks: list[dict]):
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    grouped = group_blocks(blocks)
-
-    # Build table-of-contents entries
-    toc_entries = []
-    if pkg_comments:
-        toc_entries.append(("Package overview", "#package-overview"))
-    for title, _ in grouped:
-        # was broken for non-ASCII
-        toc_entries.append((title, slugify(title)))  
+def render(packages: list[dict]) -> None:
+    OUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with OUT_FILE.open("w", encoding="utf-8") as f:
-
-        # Header
         f.write("# Censys-Go — CLI Documentation\n\n")
         f.write('<div id="header" align="center">\n')
-        f.write('    <img src="https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExcnlxcXUxaHhsa2J0N3ZranM2a3RxaXUyaWRpZW96bHoxY2poaXJ3bCZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/q15lIdQWBYs7K/giphy.gif" width="200"/>\n')
-        f.write('</div>\n\n')
-        # Table of contents
+        f.write(f'    <img src="{HEADER_IMAGE}" width="200"/>\n')
+        f.write("</div>\n\n")
+        f.write("_Generated by `scripts/generate_docs.py`. Edit the Go doc comments, not this file._\n\n")
+
         f.write("## Table of contents\n\n")
-        for idx, (label, anchor) in enumerate(toc_entries, 1):
-            f.write(f"{idx}. [{label}]({anchor})\n")
+        for index, pkg in enumerate(packages, 1):
+            heading = f"Package `{pkg['name']}`"
+            f.write(f"{index}. [{heading}]({slugify(heading)}) — `{pkg['path']}`\n")
         f.write("\n---\n\n")
 
-        # Package-level overview
-        if pkg_comments:
-            f.write("## Package overview\n\n")
-            f.write("\n".join(pkg_comments) + "\n\n---\n\n")
+        for pkg in packages:
+            f.write(f"## Package `{pkg['name']}`\n\n")
 
-        # Grouped sections
-        for title, members in grouped:
-            f.write(f"## {title}\n\n")
+            if pkg["doc"]:
+                f.write("\n".join(pkg["doc"]) + "\n\n")
 
-            # Summary table
-            f.write("| Function / Type | Description |\n")
-            f.write("|-----------------|-------------|\n")
-            for b in members:
-                sig = _signature(b)
-                desc = b["comment"].splitlines()[0] if b["comment"] else "_No description provided._"
-                desc = desc.replace("|", "\\|")
-                f.write(f"| `{sig}` | {desc} |\n")
+            f.write(f"Directory: `{pkg['path']}`\n\n")
+            f.write("Files: " + ", ".join(f"`{Path(name).name}`" for name in pkg["files"]) + "\n\n")
+
+            if not pkg["blocks"]:
+                f.write("_No documented declarations._\n\n---\n\n")
+                continue
+
+            f.write("| Declaration | Description |\n|---|---|\n")
+            for block in pkg["blocks"]:
+                summary = block["comment"].splitlines()[0].replace("|", "\\|")
+                f.write(f"| `{signature(block)}` | {summary} |\n")
             f.write("\n")
 
-            # Detailed entries
-            for b in members:
-                sig = _signature(b)
-                f.write(f"### `{sig}`\n\n")
-                if b["comment"]:
-                    f.write(b["comment"] + "\n\n")
-                else:
-                    f.write("_No comment provided._\n\n")
+            for block in pkg["blocks"]:
+                f.write(f"### `{signature(block)}`\n\n{block['comment']}\n\n")
 
             f.write("---\n\n")
 
     print(f"Generated {OUT_FILE}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 def main() -> int:
-    if not SRC.exists():
-        print(f"Error: source file '{SRC}' not found.")
+    packages = collect_packages()
+    if not packages:
+        print("Error: no Go sources found; run this from the repository root.")
         return 1
 
-    text = SRC.read_text(encoding="utf-8")
-    pkg_comments, blocks = parse_source(text)
-
-    if not blocks:
-        print("Warning: no functions or types found in source.")
-
-    render_md(pkg_comments, blocks)
+    render(packages)
     return 0
 
 

@@ -45,7 +45,9 @@ func run() int {
 	switch {
 	case err == nil:
 		return exitOK
-	case errors.Is(err, context.Canceled):
+	case cli.Interrupted(ctx, err):
+		// Partial results have already been written and flushed; the non-zero
+		// status is what tells a calling script the run was cut short.
 		fmt.Fprintln(os.Stderr, "interrupted")
 		return exitSignal
 	case errors.Is(err, cli.ErrUsage):

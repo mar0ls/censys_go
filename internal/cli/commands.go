@@ -13,6 +13,7 @@ import (
 	"github.com/mar0ls/censys_go/internal/censysx"
 	"github.com/mar0ls/censys_go/internal/config"
 	"github.com/mar0ls/censys_go/internal/hunt"
+	"github.com/mar0ls/censys_go/internal/render"
 	"github.com/mar0ls/censys_go/internal/ui"
 )
 
@@ -211,7 +212,7 @@ func commands() []command {
 
 				stream := s.stream()
 				for _, b := range result.GetBuckets() {
-					if err := stream.Value(map[string]any{"key": b.Key, "count": b.Count}); err != nil {
+					if err := stream.Record(render.Bucket(field, b)); err != nil {
 						_ = stream.Close()
 						return err
 					}
@@ -297,10 +298,11 @@ func runSearch(ctx context.Context, s *session, params censysx.SearchParams, pag
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
 	}
-	// An interrupt mid-walk is not a failure: whatever was written is valid.
-	if errors.Is(err, context.Canceled) {
-		s.warnf("interrupted after %d hosts", count)
-		return nil
+	// Whatever was written before the interrupt is valid and already flushed,
+	// but the run did not complete, so the status still has to say so.
+	if Interrupted(ctx, err) {
+		s.warnf("interrupted after %d hosts; results so far are written", count)
+		return ctx.Err()
 	}
 	if err != nil {
 		return err
@@ -327,9 +329,9 @@ func runHosts(ctx context.Context, s *session, targets []string, at *time.Time) 
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
 	}
-	if errors.Is(err, context.Canceled) {
-		s.warnf("interrupted after %d hosts", found)
-		return nil
+	if Interrupted(ctx, err) {
+		s.warnf("interrupted after %d hosts; results so far are written", found)
+		return ctx.Err()
 	}
 	if err != nil {
 		return err
@@ -347,15 +349,22 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 
 	stream := s.stream()
 	fetched, failed := 0, 0
+	interrupted := false
 
 	for _, target := range targets {
 		if ctx.Err() != nil {
-			s.warnf("interrupted after %d hosts", fetched)
+			interrupted = true
 			break
 		}
 
 		host, err := s.client.Host(ctx, target, at)
 		if err != nil {
+			// A request cut short by the interrupt is not a failure of that host.
+			if Interrupted(ctx, err) {
+				s.warnf("interrupted after %d hosts; results so far are written", fetched)
+				interrupted = true
+				break
+			}
 			failed++
 			if censysx.IsNotFound(err) {
 				s.warnf("%s: not present in Censys", target)
@@ -381,6 +390,9 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 		return err
 	}
 	s.okf("%d hosts written, %d failed", fetched, failed)
+	if interrupted {
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -391,21 +403,14 @@ func runCertHosts(ctx context.Context, s *session, p censysx.CertObservationPara
 
 	total, err := s.client.CertObservations(ctx, p, func(r components.HostObservationRange) error {
 		seen[r.IP] = struct{}{}
-		return stream.Value(map[string]any{
-			"ip":                 r.IP,
-			"port":               r.Port,
-			"transport_protocol": r.TransportProtocol,
-			"protocols":          r.Protocols,
-			"first_seen":         r.StartTime.Format(time.RFC3339),
-			"last_seen":          r.EndTime.Format(time.RFC3339),
-		})
+		return stream.Record(render.Observation(r))
 	})
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
 	}
-	if errors.Is(err, context.Canceled) {
-		s.warnf("interrupted after %d hosts", len(seen))
-		return nil
+	if Interrupted(ctx, err) {
+		s.warnf("interrupted after %d hosts; results so far are written", len(seen))
+		return ctx.Err()
 	}
 	if err != nil {
 		return err

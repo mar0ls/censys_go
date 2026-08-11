@@ -1,9 +1,11 @@
 name: CI
 
-on:
+# Quoted because YAML 1.1 reads a bare `on` as the boolean true, which trips up
+# editor schemas even though GitHub itself accepts either form.
+"on":
   push:
     branches: [main]
-  pull_request:
+  pull_request: {}
 
 permissions:
   contents: read

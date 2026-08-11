@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/censys/censys-sdk-go/models/components"
 	"github.com/mar0ls/censys_go/internal/censysx"
@@ -142,22 +144,127 @@ func TestTableIsAlignedAndHeadered(t *testing.T) {
 	}
 }
 
-func TestValueFallsBackToJSONInTabularFormats(t *testing.T) {
-	for _, f := range []Format{CSV, Table} {
-		t.Run(string(f), func(t *testing.T) {
-			var buf bytes.Buffer
-			s := NewStream(&buf, f)
-			if err := s.Value(map[string]string{"key": "value"}); err != nil {
-				t.Fatalf("Value: %v", err)
-			}
-			if err := s.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
-			if !strings.Contains(buf.String(), `{"key":"value"}`) {
-				t.Errorf("output missing JSON payload:\n%s", buf.String())
-			}
-		})
+// Records that are not host-shaped must still tabulate, otherwise
+// `cert-hosts --format csv` silently emits JSON into a .csv file.
+func TestRecordUsesItsOwnColumns(t *testing.T) {
+	rec := Observation(components.HostObservationRange{
+		IP:                "198.51.100.4",
+		Port:              9001,
+		TransportProtocol: "tcp",
+		Protocols:         []string{"HTTP", "TLS"},
+		StartTime:         time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC),
+		EndTime:           time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC),
+	})
+
+	var buf bytes.Buffer
+	s := NewStream(&buf, CSV)
+	if err := s.Record(rec); err != nil {
+		t.Fatalf("Record: %v", err)
 	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	rows, err := csv.NewReader(strings.NewReader(buf.String())).ReadAll()
+	if err != nil {
+		t.Fatalf("not valid CSV: %v\n%s", err, buf.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want header + 1", len(rows))
+	}
+	if want := []string{"ip", "port", "transport_protocol", "protocols", "first_seen", "last_seen"}; !reflect.DeepEqual(rows[0], want) {
+		t.Errorf("header = %v, want %v", rows[0], want)
+	}
+	if rows[1][0] != "198.51.100.4" || rows[1][1] != "9001" || rows[1][3] != "HTTP,TLS" {
+		t.Errorf("row = %v", rows[1])
+	}
+}
+
+// A CSV cannot change shape midway, so a record with different columns has to
+// degrade rather than corrupt the file.
+func TestRecordWithDifferentColumnsFallsBack(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewStream(&buf, CSV)
+	if err := s.Host(sampleRecords()[0]); err != nil {
+		t.Fatalf("Host: %v", err)
+	}
+	if err := s.Record(Bucket("services.port", components.SearchAggregateResponseBucket{Key: "443", Count: 12})); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if !strings.HasPrefix(lines[0], "ip,asn") {
+		t.Errorf("header = %q, want the host schema", lines[0])
+	}
+	if !strings.Contains(lines[len(lines)-1], `"key"`) {
+		t.Errorf("mismatched record was not degraded to JSON: %q", lines[len(lines)-1])
+	}
+}
+
+func TestBucketCarriesTheAggregatedField(t *testing.T) {
+	rec := Bucket("location.country", components.SearchAggregateResponseBucket{Key: "Seychelles", Count: 97})
+	if want := []string{"field", "key", "count"}; !reflect.DeepEqual(rec.Columns, want) {
+		t.Errorf("Columns = %v, want %v", rec.Columns, want)
+	}
+	if want := []string{"location.country", "Seychelles", "97"}; !reflect.DeepEqual(rec.Values, want) {
+		t.Errorf("Values = %v, want %v", rec.Values, want)
+	}
+}
+
+// The table header is upper-cased for legibility; the CSV header must not be,
+// or downstream tools stop recognising the field names.
+func TestCSVHeaderKeepsFieldNamesVerbatim(t *testing.T) {
+	var buf bytes.Buffer
+	s := NewStream(&buf, CSV)
+	if err := s.Host(sampleRecords()[0]); err != nil {
+		t.Fatalf("Host: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !strings.HasPrefix(buf.String(), "ip,asn,as_name") {
+		t.Errorf("header = %q", strings.SplitN(buf.String(), "\n", 2)[0])
+	}
+}
+
+// A value with no columns still has to come out, and the file has to stay
+// parseable: in CSV that means one quoted field, not a raw JSON line.
+func TestValueFallsBackToJSONInTabularFormats(t *testing.T) {
+	t.Run("csv", func(t *testing.T) {
+		var buf bytes.Buffer
+		s := NewStream(&buf, CSV)
+		if err := s.Value(map[string]string{"key": "value"}); err != nil {
+			t.Fatalf("Value: %v", err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+
+		rows, err := csv.NewReader(strings.NewReader(buf.String())).ReadAll()
+		if err != nil {
+			t.Fatalf("output is not valid CSV: %v\n%s", err, buf.String())
+		}
+		if len(rows) != 1 || rows[0][0] != `{"key":"value"}` {
+			t.Errorf("rows = %v", rows)
+		}
+	})
+
+	t.Run("table", func(t *testing.T) {
+		var buf bytes.Buffer
+		s := NewStream(&buf, Table)
+		if err := s.Value(map[string]string{"key": "value"}); err != nil {
+			t.Fatalf("Value: %v", err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if !strings.Contains(buf.String(), `{"key":"value"}`) {
+			t.Errorf("output missing JSON payload:\n%s", buf.String())
+		}
+	})
 }
 
 func TestCount(t *testing.T) {

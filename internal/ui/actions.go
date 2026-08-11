@@ -299,9 +299,9 @@ func (u *UI) bulkFetch(ctx context.Context, targets []string) error {
 	}
 	u.printf("\n")
 
-	if errors.Is(err, context.Canceled) {
+	if err != nil && ctx.Err() != nil {
 		u.warnf("interrupted after %d hosts; what was fetched is already written", found)
-		return nil
+		return ctx.Err()
 	}
 	if err != nil {
 		return err
@@ -330,14 +330,7 @@ func (u *UI) certHosts(ctx context.Context) error {
 		Start:       time.Now().AddDate(0, 0, -window),
 	}, func(r components.HostObservationRange) error {
 		seen[r.IP] = struct{}{}
-		return stream.Value(map[string]any{
-			"ip":                 r.IP,
-			"port":               r.Port,
-			"transport_protocol": r.TransportProtocol,
-			"protocols":          r.Protocols,
-			"first_seen":         r.StartTime.Format(time.RFC3339),
-			"last_seen":          r.EndTime.Format(time.RFC3339),
-		})
+		return stream.Record(render.Observation(r))
 	})
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
@@ -416,7 +409,7 @@ func (u *UI) aggregate(ctx context.Context) error {
 
 	stream := u.stream()
 	for _, bucket := range result.GetBuckets() {
-		if err := stream.Value(map[string]any{"key": bucket.Key, "count": bucket.Count}); err != nil {
+		if err := stream.Record(render.Bucket(field, bucket)); err != nil {
 			_ = stream.Close()
 			return err
 		}

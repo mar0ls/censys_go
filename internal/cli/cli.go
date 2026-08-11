@@ -26,6 +26,17 @@ import (
 // exit 2 rather than 1.
 var ErrUsage = errors.New("usage")
 
+// Interrupted reports whether err is the consequence of ctx being cancelled
+// rather than a genuine failure.
+//
+// Testing the error is not enough. signal.NotifyContext attaches a cause, and
+// net/http reports that cause instead of context.Canceled, so
+// errors.Is(err, context.Canceled) is false for anything that failed in
+// transit. The context itself is the reliable signal.
+func Interrupted(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil
+}
+
 // Env carries the process environment a command runs against.
 type Env struct {
 	In      io.Reader
