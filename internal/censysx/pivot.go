@@ -14,6 +14,11 @@ import (
 // maxObservationPageSize is the cap the observations endpoint documents.
 const maxObservationPageSize = 100
 
+// ObservationCreditsPerPage is what the observations endpoint costs. It is an
+// order of magnitude more than an ordinary lookup, so callers surface it before
+// walking a long result set.
+const ObservationCreditsPerPage = 5
+
 // CertObservationParams narrows a certificate-observation lookup.
 type CertObservationParams struct {
 	// Fingerprint is the certificate's SHA-256 digest.
@@ -28,6 +33,10 @@ type CertObservationParams struct {
 	Protocol string
 
 	PageSize int
+
+	// MaxPages bounds how many pages are fetched. Zero means every page; each
+	// one costs ObservationCreditsPerPage.
+	MaxPages int
 }
 
 // CertObservations reports every host seen serving a given certificate, as
@@ -37,10 +46,12 @@ type CertObservationParams struct {
 // certificate off one panel and the endpoint returns the rest of the fleet,
 // including hosts that have since gone dark and so no longer appear in a live
 // search.
-func (c *Client) CertObservations(ctx context.Context, p CertObservationParams, fn func(components.HostObservationRange) error) (int64, error) {
+// It reports the total the API claims and how many pages were actually
+// fetched, so the caller can account for what the walk cost.
+func (c *Client) CertObservations(ctx context.Context, p CertObservationParams, fn func(components.HostObservationRange) error) (total int64, pages int, err error) {
 	fingerprint, err := NormalizeFingerprint(p.Fingerprint)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	pageSize := p.PageSize
@@ -65,35 +76,38 @@ func (c *Client) CertObservations(ctx context.Context, p CertObservationParams, 
 		req.Protocol = censys.Pointer(p.Protocol)
 	}
 
-	var total int64
-	for {
+	for p.MaxPages == 0 || pages < p.MaxPages {
 		if err := ctx.Err(); err != nil {
-			return total, err
+			return total, pages, err
 		}
 
 		resp, err := c.sdk.ThreatHunting.GetHostObservationsWithCertificate(ctx, req)
 		if err != nil {
-			return total, fmt.Errorf("observations for %s: %w", fingerprint, err)
+			return total, pages, fmt.Errorf("observations for %s: %w", fingerprint, err)
 		}
+		pages++
 
 		result := resp.GetResponseEnvelopeHostObservationResponse().GetResult()
 		if result == nil {
-			return total, errors.New("observations: response carried no result")
+			return total, pages, errors.New("observations: response carried no result")
 		}
 		total = result.GetTotalResults()
 
 		for _, r := range result.GetRanges() {
 			if err := fn(r); err != nil {
-				return total, err
+				return total, pages, err
 			}
 		}
 
 		next := result.GetNextPageToken()
 		if next == nil || *next == "" {
-			return total, nil
+			return total, pages, nil
 		}
 		req.PageToken = next
 	}
+
+	// Stopped at MaxPages with a continuation token still outstanding.
+	return total, pages, nil
 }
 
 // Timeline returns a host's service and certificate change history between two

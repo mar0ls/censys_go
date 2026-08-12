@@ -66,6 +66,7 @@ Files: `args.go`, `cli.go`, `commands.go`
 | `globals` | globals holds the flags every subcommand shares. |
 | `command` | command is one subcommand. |
 | `Run()` | Run parses args and dispatches to a subcommand. With no arguments it starts |
+| `examples` | CenQL requires the dataset prefix on every field, so each example carries it. |
 | `session` | session bundles everything a command needs at run time. |
 | `newSession()` | newSession resolves credentials, builds the client, and opens the output |
 | `commands()` | commands returns the subcommand table. |
@@ -138,6 +139,10 @@ command is one subcommand.
 
 Run parses args and dispatches to a subcommand. With no arguments it starts
 the interactive menu.
+
+### `examples`
+
+CenQL requires the dataset prefix on every field, so each example carries it.
 
 ### `session`
 
@@ -228,6 +233,7 @@ Files: `asset.go`, `batch.go`, `client.go`, `credits.go`, `errors.go`, `model.go
 | `IPsFromHits()` | IPsFromHits returns the distinct IPs in a set of search hits, in result order. |
 | `distinct()` | distinct collects the non-empty strings produced by push, dropping duplicates |
 | `maxObservationPageSize` | maxObservationPageSize is the cap the observations endpoint documents. |
+| `ObservationCreditsPerPage` | ObservationCreditsPerPage is what the observations endpoint costs. It is an |
 | `CertObservationParams` | CertObservationParams narrows a certificate-observation lookup. |
 | `Client.CertObservations()` | CertObservations reports every host seen serving a given certificate, as |
 | `Client.Timeline()` | Timeline returns a host's service and certificate change history between two |
@@ -386,6 +392,12 @@ and preserving first-seen order.
 
 maxObservationPageSize is the cap the observations endpoint documents.
 
+### `ObservationCreditsPerPage`
+
+ObservationCreditsPerPage is what the observations endpoint costs. It is an
+order of magnitude more than an ordinary lookup, so callers surface it before
+walking a long result set.
+
 ### `CertObservationParams`
 
 CertObservationParams narrows a certificate-observation lookup.
@@ -399,6 +411,8 @@ This is the pivot that turns a single sample into a campaign: take the
 certificate off one panel and the endpoint returns the rest of the fleet,
 including hosts that have since gone dark and so no longer appear in a live
 search.
+It reports the total the API claims and how many pages were actually
+fetched, so the caller can account for what the walk cost.
 
 ### `Client.Timeline()`
 
@@ -413,8 +427,12 @@ round and swaps it.
 ### `DefaultSearchFields`
 
 DefaultSearchFields is the field set requested from Search. Keeping it tight
-keeps responses small; every name here maps onto a field the response model
-actually carries.
+keeps responses small.
+
+Every name is a documented CenQL path and maps onto a field the response
+model carries. Note the certificate digest: the docs name
+host.services.cert.fingerprint_sha256 as the field to pivot on, and the
+flattener reads it from the same place.
 
 ### `SearchParams`
 
@@ -754,7 +772,8 @@ usageWindowDays is the reporting window for the credit usage summary.
 ### `const block`
 
 CenQL fields used to pivot from one host's artifacts to everything else
-presenting the same artifact.
+presenting the same artifact. Platform queries require the dataset prefix:
+a bare "services.port" matches nothing.
 
 ### `exampleQueries`
 

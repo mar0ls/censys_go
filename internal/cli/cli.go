@@ -193,10 +193,11 @@ func printCommandUsage(env Env, fs *flag.FlagSet, cmd *command) {
 	fs.PrintDefaults()
 }
 
+// CenQL requires the dataset prefix on every field, so each example carries it.
 var examples = []string{
-	`  censys search -q 'services.port:9001 and services.tls.certificates.leaf_data.subject.organization:"cobaltstrike"' --pages 0 > c2.ndjson`,
+	`  censys search -q 'host.services.port=9001 and host.services.software.product:"Team Server"' --pages 0 > c2.ndjson`,
 	`  censys host 198.51.100.7 --format table`,
-	`  censys aggregate -q 'services.jarm.fingerprint:"07d14d16d21d21d"' --field location.country`,
+	`  censys aggregate -q 'host.services.jarm.fingerprint="07d14d16d21d21d"' --field host.location.country`,
 	`  cat suspects.txt | censys host --format ndjson | jq -r 'select(.asn == 64500) | .ip'`,
 }
 

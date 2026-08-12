@@ -97,7 +97,7 @@ interrupted, and `1` otherwise. An interrupt keeps whatever was already written.
 Find a Cobalt Strike population and keep every page:
 
 ```bash
-censys_go search -q 'services.port:9001 and services.software.product:"Team Server"' \
+censys_go search -q 'host.services.port=9001 and host.services.software.product:"Team Server"' \
   --pages 0 > c2.ndjson
 ```
 
@@ -105,14 +105,14 @@ Pivot from one panel's certificate to the rest of the fleet, then pull full
 records for what you find:
 
 ```bash
-censys_go cert-hosts 3fa1b2c4... --since 2026-01-01 --format csv > observed.csv
+censys_go cert-hosts 3fa1b2c4... --since 2026-01-01 --pages 3 --format csv > observed.csv
 cut -d, -f1 observed.csv | tail -n +2 | sort -u | censys_go host > fleet.ndjson
 ```
 
 Work a result set with `jq`:
 
 ```bash
-censys_go search -q 'services.jarm.fingerprint:"07d14d16d21d21d"' --pages 0 \
+censys_go search -q 'host.services.jarm.fingerprint="07d14d16d21d21d"' --pages 0 \
   | jq -r 'select(.asn == 64500) | .ip'
 ```
 
@@ -128,12 +128,34 @@ Read targets from a file, expanding CIDR prefixes on the way in:
 censys_go host -f suspects.txt --format table
 ```
 
+### Query syntax
+
+Platform queries are CenQL and every field carries its dataset prefix — a bare
+`services.port` matches nothing, it has to be `host.services.port`. Two
+comparison operators are available and they differ: `:` is a case-insensitive
+tokenized match, `=` is exact. Use `=` for fingerprints and ports, `:` when you
+want a substring-ish match on a product or organisation name.
+
+Queries copied from the legacy Censys Search syntax will not run as-is; Censys
+publishes a [query converter](https://docs.censys.com/docs/query-converter) for
+migrating them.
+
 ### Credit cost
 
-Every host returned by `host` costs a credit, so the target list is
-deduplicated before anything is sent, and CIDR prefixes wider than 4096
-addresses are refused rather than silently expanded. `credits` reports the
-balance before you commit to a large sweep.
+Per the [Censys credit documentation](https://docs.censys.com/docs/platform-credits-enterprise):
+
+| Action | Cost |
+|---|---|
+| `search` | 1 credit, plus 1 for each additional page of 100 |
+| `host` | 1 credit per asset retrieved |
+| `cert` | 1 credit |
+| `cert-hosts` | **5 credits per page** of 100 |
+
+`cert-hosts` is the expensive one, so it reports the cost up front and how many
+pages it actually fetched; cap it with `--pages`. Target lists are deduplicated
+before anything is sent, and CIDR prefixes wider than 4096 addresses are refused
+rather than silently expanded. `credits` reports the balance before you commit
+to a large sweep.
 
 ## Output formats
 

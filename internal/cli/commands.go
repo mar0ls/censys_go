@@ -97,6 +97,7 @@ func commands() []command {
 				fs.StringVar(&until, "until", "", "only ranges starting at or before this time")
 				fs.IntVar(&port, "port", 0, "restrict to one port")
 				fs.StringVar(&protocol, "protocol", "", "restrict to one transport protocol")
+				fs.IntVar(&pages, "pages", 0, "pages of 100 to fetch, 0 for every page; each costs 5 credits")
 			},
 			run: func(ctx context.Context, s *session, args []string) error {
 				if len(args) != 1 {
@@ -110,12 +111,16 @@ func commands() []command {
 				if err != nil {
 					return err
 				}
+				if pages < 0 {
+					return fmt.Errorf("%w: --pages cannot be negative", ErrUsage)
+				}
 				return runCertHosts(ctx, s, censysx.CertObservationParams{
 					Fingerprint: args[0],
 					Start:       valueOrZero(start),
 					End:         valueOrZero(end),
 					Port:        port,
 					Protocol:    protocol,
+					MaxPages:    pages,
 				})
 			},
 		},
@@ -194,7 +199,7 @@ func commands() []command {
 			summary: "bucket a query by field to see how a population is distributed",
 			register: func(fs *flag.FlagSet) {
 				fs.StringVar(&query, "q", "", "CenQL query (required)")
-				fs.StringVar(&field, "field", "services.port", "field to aggregate on")
+				fs.StringVar(&field, "field", "host.services.port", "field to aggregate on")
 				fs.IntVar(&buckets, "buckets", 20, "number of buckets to return")
 			},
 			run: func(ctx context.Context, s *session, _ []string) error {
@@ -398,10 +403,18 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 
 // runCertHosts streams the observation ranges for a certificate.
 func runCertHosts(ctx context.Context, s *session, p censysx.CertObservationParams) error {
+	if p.MaxPages > 0 {
+		s.infof("up to %d page(s) of 100, %d credits each",
+			p.MaxPages, censysx.ObservationCreditsPerPage)
+	} else {
+		s.infof("every page of 100, %d credits each; cap it with --pages",
+			censysx.ObservationCreditsPerPage)
+	}
+
 	stream := s.stream()
 	seen := map[string]struct{}{}
 
-	total, err := s.client.CertObservations(ctx, p, func(r components.HostObservationRange) error {
+	total, pages, err := s.client.CertObservations(ctx, p, func(r components.HostObservationRange) error {
 		seen[r.IP] = struct{}{}
 		return stream.Record(render.Observation(r))
 	})
@@ -416,7 +429,11 @@ func runCertHosts(ctx context.Context, s *session, p censysx.CertObservationPara
 		return err
 	}
 
-	s.okf("%d observation ranges across %d unique hosts (%d reported)", stream.Count(), len(seen), total)
+	s.okf("%d observation ranges across %d unique hosts (%d reported); %d page(s), about %d credits",
+		stream.Count(), len(seen), total, pages, pages*censysx.ObservationCreditsPerPage)
+	if p.MaxPages > 0 && pages == p.MaxPages && int64(stream.Count()) < total {
+		s.warnf("stopped at the --pages limit; %d ranges were not fetched", total-int64(stream.Count()))
+	}
 	return nil
 }
 

@@ -11,11 +11,15 @@ import (
 )
 
 // DefaultSearchFields is the field set requested from Search. Keeping it tight
-// keeps responses small; every name here maps onto a field the response model
-// actually carries.
+// keeps responses small.
+//
+// Every name is a documented CenQL path and maps onto a field the response
+// model carries. Note the certificate digest: the docs name
+// host.services.cert.fingerprint_sha256 as the field to pivot on, and the
+// flattener reads it from the same place.
 var DefaultSearchFields = []string{
 	"host.ip",
-	"host.name",
+	"host.dns.names",
 	"host.location.country",
 	"host.location.city",
 	"host.autonomous_system.name",
@@ -24,9 +28,8 @@ var DefaultSearchFields = []string{
 	"host.services.protocol",
 	"host.services.transport_protocol",
 	"host.services.software",
-	"host.services.tls.fingerprint_sha256",
+	"host.services.cert.fingerprint_sha256",
 	"host.services.jarm.fingerprint",
-	"host.last_updated_at",
 }
 
 // SearchParams describes one search request.

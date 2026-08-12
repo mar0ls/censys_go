@@ -22,19 +22,20 @@ import (
 const usageWindowDays = 30
 
 // CenQL fields used to pivot from one host's artifacts to everything else
-// presenting the same artifact.
+// presenting the same artifact. Platform queries require the dataset prefix:
+// a bare "services.port" matches nothing.
 const (
-	certFingerprintField = "services.tls.certificates.leaf_data.fingerprint_sha256"
-	jarmFingerprintField = "services.jarm.fingerprint"
+	certFingerprintField = "host.services.cert.fingerprint_sha256"
+	jarmFingerprintField = "host.services.jarm.fingerprint"
 )
 
 // exampleQueries are shown before the query prompt as a reminder of CenQL syntax.
 var exampleQueries = []string{
-	`services.port:443`,
-	`services.port:22 and location.country:"PL"`,
-	`services.software.product:"Apache"`,
-	`services.tls.certificates.leaf_data.subject.common_name:"example.com"`,
-	`services.jarm.fingerprint:"07d14d16d21d21d07c42d41d00041d24"`,
+	`host.services.port=443`,
+	`host.services.port=22 and host.location.country="Poland"`,
+	`host.services.software.product:"Apache"`,
+	`host.services.cert.fingerprint_sha256="<sha256>"`,
+	`host.services.jarm.fingerprint="07d14d16d21d21d07c42d41d00041d24"`,
 }
 
 func (u *UI) credits(ctx context.Context) error {
@@ -182,7 +183,9 @@ func (u *UI) pivotQuery(ctx context.Context, field string, values []string) erro
 		return nil
 	}
 
-	query := fmt.Sprintf("%s:%q", field, values[idx])
+	// "=" rather than ":": a fingerprint has to match exactly, and ":" is a
+	// case-insensitive tokenized match that would pull in unrelated hosts.
+	query := fmt.Sprintf("%s=%q", field, values[idx])
 	u.infof("Running: %s", query)
 
 	stream := u.stream()
@@ -321,13 +324,19 @@ func (u *UI) certHosts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	maxPages, err := u.askInt(
+		fmt.Sprintf("Pages of 100 to fetch (%d credits each)", censysx.ObservationCreditsPerPage), 3)
+	if err != nil {
+		return err
+	}
 
 	stream := u.stream()
 	seen := map[string]struct{}{}
 
-	total, err := u.client.CertObservations(ctx, censysx.CertObservationParams{
+	total, pages, err := u.client.CertObservations(ctx, censysx.CertObservationParams{
 		Fingerprint: fingerprint,
 		Start:       time.Now().AddDate(0, 0, -window),
+		MaxPages:    maxPages,
 	}, func(r components.HostObservationRange) error {
 		seen[r.IP] = struct{}{}
 		return stream.Record(render.Observation(r))
@@ -339,7 +348,8 @@ func (u *UI) certHosts(ctx context.Context) error {
 		return err
 	}
 
-	u.okf("%d ranges across %d unique hosts (%d reported)", stream.Count(), len(seen), total)
+	u.okf("%d ranges across %d unique hosts (%d reported); %d page(s), about %d credits",
+		stream.Count(), len(seen), total, pages, pages*censysx.ObservationCreditsPerPage)
 	if len(seen) > 0 {
 		fetch, err := u.confirm(fmt.Sprintf("Fetch full records for those %d hosts?", len(seen)), false)
 		if err != nil || !fetch {
@@ -393,7 +403,7 @@ func (u *UI) aggregate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	field, err := u.askDefault("Field to aggregate", "services.port")
+	field, err := u.askDefault("Field to aggregate", "host.services.port")
 	if err != nil {
 		return err
 	}

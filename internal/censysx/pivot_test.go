@@ -70,7 +70,7 @@ func TestCertObservationsWalksEveryPage(t *testing.T) {
 	})
 
 	var got []string
-	total, err := client.CertObservations(context.Background(),
+	total, _, err := client.CertObservations(context.Background(),
 		CertObservationParams{Fingerprint: strings.Repeat("ab", 32)},
 		func(r components.HostObservationRange) error {
 			got = append(got, r.IP)
@@ -93,12 +93,54 @@ func TestCertObservationsWalksEveryPage(t *testing.T) {
 	}
 }
 
+// Each page costs ObservationCreditsPerPage, so an unbounded walk on a widely
+// deployed certificate is expensive. MaxPages has to actually stop it.
+func TestCertObservationsHonoursMaxPages(t *testing.T) {
+	client, queries := pivotServer(t, []map[string]any{
+		observationPage([]string{"198.51.100.1"}, "page-2", 500),
+		observationPage([]string{"198.51.100.2"}, "page-3", 500),
+	})
+
+	total, pages, err := client.CertObservations(context.Background(),
+		CertObservationParams{Fingerprint: strings.Repeat("ab", 32), MaxPages: 2},
+		func(components.HostObservationRange) error { return nil })
+	if err != nil {
+		t.Fatalf("CertObservations: %v", err)
+	}
+	if pages != 2 {
+		t.Errorf("fetched %d pages, want 2", pages)
+	}
+	if len(*queries) != 2 {
+		t.Errorf("made %d requests, want 2 (a token was still outstanding)", len(*queries))
+	}
+	if total != 500 {
+		t.Errorf("total = %d, want the API's figure of 500", total)
+	}
+}
+
+func TestCertObservationsReportsPagesFetched(t *testing.T) {
+	client, _ := pivotServer(t, []map[string]any{
+		observationPage([]string{"198.51.100.1"}, "page-2", 2),
+		observationPage([]string{"198.51.100.2"}, "", 2),
+	})
+
+	_, pages, err := client.CertObservations(context.Background(),
+		CertObservationParams{Fingerprint: strings.Repeat("ab", 32)},
+		func(components.HostObservationRange) error { return nil })
+	if err != nil {
+		t.Fatalf("CertObservations: %v", err)
+	}
+	if pages != 2 {
+		t.Errorf("pages = %d, want 2", pages)
+	}
+}
+
 func TestCertObservationsAppliesFilters(t *testing.T) {
 	client, queries := pivotServer(t, []map[string]any{observationPage(nil, "", 0)})
 
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := client.CertObservations(context.Background(), CertObservationParams{
+	if _, _, err := client.CertObservations(context.Background(), CertObservationParams{
 		Fingerprint: strings.Repeat("ab", 32),
 		Start:       start,
 		End:         end,
@@ -119,7 +161,7 @@ func TestCertObservationsAppliesFilters(t *testing.T) {
 func TestCertObservationsCapsPageSize(t *testing.T) {
 	client, queries := pivotServer(t, []map[string]any{observationPage(nil, "", 0)})
 
-	if _, err := client.CertObservations(context.Background(), CertObservationParams{
+	if _, _, err := client.CertObservations(context.Background(), CertObservationParams{
 		Fingerprint: strings.Repeat("ab", 32),
 		PageSize:    5000,
 	}, func(components.HostObservationRange) error { return nil }); err != nil {
@@ -132,7 +174,7 @@ func TestCertObservationsCapsPageSize(t *testing.T) {
 
 func TestCertObservationsValidatesFingerprint(t *testing.T) {
 	client, _ := pivotServer(t, nil)
-	if _, err := client.CertObservations(context.Background(),
+	if _, _, err := client.CertObservations(context.Background(),
 		CertObservationParams{Fingerprint: "nope"},
 		func(components.HostObservationRange) error { return nil }); err == nil {
 		t.Error("CertObservations accepted a malformed fingerprint")

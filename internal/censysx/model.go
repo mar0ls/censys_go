@@ -111,8 +111,17 @@ func newServiceRecord(svc *components.Service) ServiceRecord {
 	if sw := svc.GetSoftware(); len(sw) > 0 {
 		rec.Software = softwareLabel(sw[0])
 	}
+	// The digest appears in two places. host.services.cert.fingerprint_sha256 is
+	// the field the docs point at for pivoting and the one DefaultSearchFields
+	// requests; the TLS handshake object carries the same value and covers a
+	// caller who asked for the full record instead.
+	if cert := svc.GetCert(); cert != nil {
+		rec.CertSHA256 = deref(cert.GetFingerprintSha256())
+	}
 	if tls := svc.GetTLS(); tls != nil {
-		rec.CertSHA256 = deref(tls.GetFingerprintSha256())
+		if rec.CertSHA256 == "" {
+			rec.CertSHA256 = deref(tls.GetFingerprintSha256())
+		}
 		rec.JA3S = deref(tls.GetJa3s())
 		rec.JA4S = deref(tls.GetJa4s())
 	}
