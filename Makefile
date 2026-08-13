@@ -3,7 +3,7 @@ PKG         := .
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     ?= -s -w -X main.version=$(VERSION)
 
-.PHONY: all build run test lint fmt vet check clean watch \
+.PHONY: all build run test lint fmt vet check clean \
         linux linux-arm64 macos macos-arm64 windows all-platforms
 
 all: build
@@ -28,12 +28,6 @@ vet:
 
 # What CI runs; use before pushing.
 check: fmt vet lint test
-
-# Follow the newest workflow run for this branch. Needs the gh CLI.
-watch:
-	gh run watch --exit-status $$(gh run list \
-	  --branch $$(git rev-parse --abbrev-ref HEAD) \
-	  --limit 1 --json databaseId --jq '.[0].databaseId')
 
 clean:
 	-@rm -f $(BINARY_NAME) $(BINARY_NAME)-* $(BINARY_NAME).exe
