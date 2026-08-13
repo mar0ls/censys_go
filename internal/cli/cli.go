@@ -221,8 +221,8 @@ func newSession(env Env, g *globals) (*session, func(), error) {
 	creds, source, err := config.Resolve(g.orgID, g.token)
 	if err != nil {
 		if errors.Is(err, config.ErrNotConfigured) {
-			return nil, nil, fmt.Errorf("no credentials: pass --org/--token, set %s and %s, or run censys with no arguments to configure interactively",
-				config.EnvOrgID, config.EnvToken)
+			return nil, nil, fmt.Errorf("no API token: pass --token, set %s, or run censys with no arguments to configure interactively",
+				config.EnvToken)
 		}
 		return nil, nil, err
 	}
@@ -243,7 +243,11 @@ func newSession(env Env, g *globals) (*session, func(), error) {
 		cleanup = func() { _ = f.Close() }
 	}
 
-	_, _ = fmt.Fprintf(msg, "[**] org %s (credentials from %s)\n", creds.OrgID, source)
+	org := creds.OrgID
+	if org == "" {
+		org = "none (asset lookups only; search needs an organization)"
+	}
+	_, _ = fmt.Fprintf(msg, "[**] org %s (credentials from %s)\n", org, source)
 
 	return &session{
 		env: env,

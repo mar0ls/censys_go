@@ -1,6 +1,7 @@
 package censysx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -77,6 +78,28 @@ func TestExplain(t *testing.T) {
 		},
 		{"detail only", &sdkerrors.ErrorModel{Detail: ptr("rate limited")}, "rate limited"},
 		{"sdk error", &sdkerrors.SDKError{Message: "unexpected response", StatusCode: 502}, "unexpected response (HTTP 502)"},
+		{
+			// Real 422 from the observations endpoint. The SDK leaves the problem
+			// document in Body, and dropping it turns a precise, actionable
+			// message into "API error occurred".
+			"problem document in the body",
+			&sdkerrors.SDKError{
+				Message:    "API error occurred",
+				StatusCode: 422,
+				Body:       `{"title":"Unprocessable Entity","status":422,"detail":"Missing organization ID"}`,
+			},
+			"Unprocessable Entity: Missing organization ID (HTTP 422)",
+		},
+		{
+			"body that is not a problem document",
+			&sdkerrors.SDKError{Message: "API error occurred", StatusCode: 500, Body: "<html>oops</html>"},
+			"API error occurred (HTTP 500)",
+		},
+		{
+			"timeout points at the remedy",
+			fmt.Errorf("timeline for 1.1.1.1: %w", context.DeadlineExceeded),
+			"timed out; some endpoints are slow, so try a longer --timeout or a narrower window",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

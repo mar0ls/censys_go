@@ -39,16 +39,34 @@ type ServiceRecord struct {
 	BannerHash string `json:"banner_sha256,omitempty"`
 }
 
-// Ports returns the host's open ports in ascending order.
+// Ports returns the host's distinct open ports in ascending order. A port can
+// carry more than one service — 443 answering both HTTP and something
+// unidentified, 53 over TCP and UDP — and listing it twice says nothing.
 func (h HostRecord) Ports() []int {
+	seen := make(map[int]struct{}, len(h.Services))
 	ports := make([]int, 0, len(h.Services))
 	for _, s := range h.Services {
-		if s.Port != 0 {
-			ports = append(ports, s.Port)
+		if s.Port == 0 {
+			continue
 		}
+		if _, dup := seen[s.Port]; dup {
+			continue
+		}
+		seen[s.Port] = struct{}{}
+		ports = append(ports, s.Port)
 	}
 	sort.Ints(ports)
 	return ports
+}
+
+// Scanned reports whether Censys observed any service on the host.
+//
+// The API returns a record for almost any address: 240.0.0.1, which is not even
+// routable, comes back with 73 DNS names and nothing else, and an unscanned
+// address inside a live prefix comes back with routing and location but no
+// services. Neither is a live host, so callers can tell them from one.
+func (h HostRecord) Scanned() bool {
+	return len(h.Services) > 0
 }
 
 // CertHashes returns the distinct certificate SHA-256 digests served by the host.

@@ -97,6 +97,33 @@ func TestHostRecordPortsAreSorted(t *testing.T) {
 	}
 }
 
+// A real host answers 443 with more than one service and 53 over both TCP and
+// UDP; listing the port twice says nothing.
+func TestHostRecordPortsAreDeduplicated(t *testing.T) {
+	host := &components.Host{Services: []components.Service{
+		{Port: ptr(443)}, {Port: ptr(53)}, {Port: ptr(443)}, {Port: ptr(53)},
+	}}
+	got := NewHostRecord(host).Ports()
+	if want := []int{53, 443}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Ports() = %v, want %v", got, want)
+	}
+}
+
+// Censys answers for almost any address, returning ip and dns alone when it has
+// no scan data. Such a record must not read as a live host.
+func TestScannedDistinguishesPassiveDNSRecords(t *testing.T) {
+	passive := NewHostRecord(&components.Host{
+		IP:  ptr("240.0.0.1"),
+		DNS: &components.HostDNS{Names: []string{"example.test"}},
+	})
+	if passive.Scanned() {
+		t.Error("a record with no services reported as scanned")
+	}
+	if !NewHostRecord(testHost()).Scanned() {
+		t.Error("a record with services reported as unscanned")
+	}
+}
+
 func TestHostRecordCertHashesDeduplicates(t *testing.T) {
 	got := NewHostRecord(testHost()).CertHashes()
 	if want := []string{"aa11"}; !reflect.DeepEqual(got, want) {

@@ -58,9 +58,14 @@ func New(opts Options) *Client {
 	}
 
 	sdkOpts := []censys.SDKOption{
-		censys.WithOrganizationID(opts.OrgID),
 		censys.WithSecurity(opts.Token),
 		censys.WithTimeout(opts.Timeout),
+	}
+	// Only set the organization when there is one: WithOrganizationID stores a
+	// pointer unconditionally, so passing "" would put an empty
+	// organization_id on every request. Asset lookups work without one.
+	if opts.OrgID != "" {
+		sdkOpts = append(sdkOpts, censys.WithOrganizationID(opts.OrgID))
 	}
 	if opts.BaseURL != "" {
 		sdkOpts = append(sdkOpts, censys.WithServerURL(opts.BaseURL))

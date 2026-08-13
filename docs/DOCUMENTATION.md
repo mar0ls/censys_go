@@ -72,6 +72,7 @@ Files: `args.go`, `cli.go`, `commands.go`
 | `commands()` | commands returns the subcommand table. |
 | `runSearch()` | runSearch streams every page of a query through the session's renderer. |
 | `runHosts()` | runHosts fetches targets through the batch endpoint, which costs one request |
+| `reportPassive()` | reportPassive flags records with no services. Censys answers for almost any |
 | `runHostsOneByOne()` | runHostsOneByOne fetches each target separately. It costs the same in credits |
 | `runCertHosts()` | runCertHosts streams the observation ranges for a certificate. |
 | `valueOrZero()` | valueOrZero dereferences an optional time, yielding the zero value for nil. |
@@ -166,6 +167,13 @@ runSearch streams every page of a query through the session's renderer.
 runHosts fetches targets through the batch endpoint, which costs one request
 per hundred hosts instead of one per host.
 
+### `reportPassive()`
+
+reportPassive flags records with no services. Censys answers for almost any
+address, sometimes with nothing but DNS and sometimes with routing data but
+no scan, so a target list that is mostly serviceless is a sign the list was
+wrong rather than that the hosts are quiet.
+
 ### `runHostsOneByOne()`
 
 runHostsOneByOne fetches each target separately. It costs the same in credits
@@ -215,16 +223,20 @@ Files: `asset.go`, `batch.go`, `client.go`, `credits.go`, `errors.go`, `model.go
 | `Client.OrgID()` | OrgID returns the organization the client acts on behalf of. |
 | `Client.SDK()` | SDK exposes the underlying SDK for calls this package does not wrap yet. |
 | `backoff()` | backoff builds the SDK retry policy. retry.BackoffStrategy takes milliseconds. |
+| `Balance` | Balance is a credit balance from either the organization or the user wallet, |
+| `Client.Balance()` | Balance returns the credit balance, reading the user wallet when no |
 | `Client.Credits()` | Credits returns the organization's current credit balance. |
 | `Client.CreditUsage()` | CreditUsage returns the daily credit usage report covering the last `days` days. |
 | `NextExpiry()` | NextExpiry returns the soonest credit expiry, or nil if none is scheduled. |
 | `StatusOf()` | StatusOf returns the HTTP status carried by err, or 0 if it carries none. |
 | `IsAuth()` | IsAuth reports whether err is a credential problem rather than a transient one. |
 | `IsNotFound()` | IsNotFound reports whether the requested asset is simply absent from Censys. |
+| `problemDocument` | problemDocument is the RFC 9457 shape the API returns on error. |
 | `Explain()` | Explain renders err for a human, unwrapping the SDK's JSON-blob error strings |
 | `HostRecord` | HostRecord is a flattened view of a host, holding the fields worth putting in |
 | `ServiceRecord` | ServiceRecord is one exposed service, reduced to the fields that identify it |
-| `HostRecord.Ports()` | Ports returns the host's open ports in ascending order. |
+| `HostRecord.Ports()` | Ports returns the host's distinct open ports in ascending order. A port can |
+| `HostRecord.Scanned()` | Scanned reports whether Censys observed any service on the host. |
 | `HostRecord.CertHashes()` | CertHashes returns the distinct certificate SHA-256 digests served by the host. |
 | `HostRecord.JARMHashes()` | JARMHashes returns the distinct JARM fingerprints observed on the host. |
 | `NewHostRecord()` | NewHostRecord flattens a Host into a HostRecord using the SDK's typed getters. |
@@ -313,6 +325,18 @@ SDK exposes the underlying SDK for calls this package does not wrap yet.
 
 backoff builds the SDK retry policy. retry.BackoffStrategy takes milliseconds.
 
+### `Balance`
+
+Balance is a credit balance from either the organization or the user wallet,
+whichever applies to the configured credentials.
+
+### `Client.Balance()`
+
+Balance returns the credit balance, reading the user wallet when no
+organization is configured. The organization endpoint needs an organization
+ID, so without this a token-only account could not see its balance at all,
+even though /v3/accounts/users/credits answers for exactly that case.
+
 ### `Client.Credits()`
 
 Credits returns the organization's current credit balance.
@@ -337,6 +361,10 @@ IsAuth reports whether err is a credential problem rather than a transient one.
 
 IsNotFound reports whether the requested asset is simply absent from Censys.
 
+### `problemDocument`
+
+problemDocument is the RFC 9457 shape the API returns on error.
+
 ### `Explain()`
 
 Explain renders err for a human, unwrapping the SDK's JSON-blob error strings
@@ -355,7 +383,18 @@ and the fingerprints that can be pivoted on.
 
 ### `HostRecord.Ports()`
 
-Ports returns the host's open ports in ascending order.
+Ports returns the host's distinct open ports in ascending order. A port can
+carry more than one service — 443 answering both HTTP and something
+unidentified, 53 over TCP and UDP — and listing it twice says nothing.
+
+### `HostRecord.Scanned()`
+
+Scanned reports whether Censys observed any service on the host.
+
+The API returns a record for almost any address: 240.0.0.1, which is not even
+routable, comes back with 73 DNS names and nothing else, and an unscanned
+address inside a live prefix comes back with routing and location but no
+services. Neither is a live host, so callers can tell them from one.
 
 ### `HostRecord.CertHashes()`
 
@@ -482,14 +521,13 @@ Files: `config.go`
 | `Credentials` | Credentials identify an organization and the token used to act on its behalf. |
 | `Source` | Source records where a set of credentials came from, so the CLI can report it |
 | `ErrNotConfigured` | ErrNotConfigured is returned by Resolve when no source supplied credentials. |
-| `Credentials.Validate()` | Validate reports whether both fields are populated. |
-| `Credentials.complete()` | complete reports whether both fields are set, without allocating an error. |
+| `Credentials.Validate()` | Validate reports whether the credentials are usable. |
 | `Credentials.Redacted()` | Redacted returns a copy safe to print or serialize in diagnostics. |
 | `Path()` | Path returns the absolute path of the credential file. |
 | `Load()` | Load reads credentials from disk. A missing file is reported as os.ErrNotExist, |
 | `Save()` | Save writes credentials to disk with owner-only permissions. |
 | `FromEnv()` | FromEnv reads credentials from the environment. Unset variables yield empty |
-| `Resolve()` | Resolve picks credentials from the first source that supplies both fields: |
+| `Resolve()` | Resolve assembles credentials from flags, the environment, and the config |
 | `homeDir()` | homeDir resolves the user's home directory, falling back to the conventional |
 
 ### `Dir`
@@ -519,11 +557,12 @@ ErrNotConfigured is returned by Resolve when no source supplied credentials.
 
 ### `Credentials.Validate()`
 
-Validate reports whether both fields are populated.
+Validate reports whether the credentials are usable.
 
-### `Credentials.complete()`
-
-complete reports whether both fields are set, without allocating an error.
+Only the token is required. Asset lookups work without an organization —
+verified against the API, where a host lookup with no organization_id
+succeeds. Search does require one, and reports that itself with a clearer
+message than anything guessable here.
 
 ### `Credentials.Redacted()`
 
@@ -549,8 +588,14 @@ fields rather than an error, so the result can be layered under other sources.
 
 ### `Resolve()`
 
-Resolve picks credentials from the first source that supplies both fields:
-explicit flags, then the environment, then the config file.
+Resolve assembles credentials from flags, the environment, and the config
+file, in that order of precedence.
+
+The two fields are resolved independently, so a token from the environment
+combines with an organization from --org. Taking both from whichever single
+source happened to carry a token would silently discard the flag. The
+reported Source is where the token came from, since that is the part that
+authenticates.
 
 Nothing is written to disk here. Credentials supplied through the environment
 stay in the process; persisting them would leak the token onto the filesystem
@@ -578,12 +623,17 @@ Files: `records.go`, `render.go`
 | Declaration | Description |
 |---|---|
 | `Observation()` | Observation renders one certificate observation range. Both the CLI and the |
+| `certColumns` | certColumns is the column order for certificate rows. |
+| `Certificate()` | Certificate renders one certificate. The raw record runs to several kilobytes |
 | `Bucket()` | Bucket renders one aggregation bucket, carrying the aggregated field name so |
+| `balanceColumns` | balanceColumns is the column order for a credit balance row. |
+| `BalanceRow()` | BalanceRow renders a credit balance, optionally with the usage figures that |
 | `Format` | Format selects an output encoding. |
 | `Formats` | Formats lists every supported format, for flag help and validation. |
 | `ParseFormat()` | ParseFormat validates a format name. |
 | `FormatNames()` | FormatNames renders the supported formats for help text. |
 | `hostColumns` | hostColumns is the column order for host rows in Table and CSV output. |
+| `maxTabularDNSNames` | maxTabularDNSNames caps how many names go in the dns column. A busy host can |
 | `Record` | Record is one result in both of the shapes the formats need: Doc for the JSON |
 | `Stream` | Stream writes records incrementally in one format. Callers must call Close to |
 | `NewStream()` | NewStream starts a stream in the given format. |
@@ -595,6 +645,7 @@ Files: `records.go`, `render.go`
 | `Stream.writeRow()` | writeRow emits one tabular row in whichever of CSV or Table is active. |
 | `Stream.write()` | write appends to the active writer, remembering the first failure. |
 | `hostRow()` | hostRow flattens a record into the columns declared by hostColumns. |
+| `truncateList()` | truncateList joins up to limit entries, noting how many were left out. |
 
 ### `Observation()`
 
@@ -602,10 +653,31 @@ Observation renders one certificate observation range. Both the CLI and the
 interactive menu emit these, so the column order lives here rather than at
 either call site.
 
+### `certColumns`
+
+certColumns is the column order for certificate rows.
+
+### `Certificate()`
+
+Certificate renders one certificate. The raw record runs to several kilobytes
+of CT log entries and lint results, which is not what a tabular format is
+for; this keeps the fields that identify the certificate and the two that can
+be pivoted on, self_signed and ja4x.
+
 ### `Bucket()`
 
 Bucket renders one aggregation bucket, carrying the aggregated field name so
 a saved file still says what it counted.
+
+### `balanceColumns`
+
+balanceColumns is the column order for a credit balance row.
+
+### `BalanceRow()`
+
+BalanceRow renders a credit balance, optionally with the usage figures that
+only an organization wallet reports. Columns make the balance trackable from
+a scheduled job appending to a CSV.
 
 ### `Format`
 
@@ -626,6 +698,12 @@ FormatNames renders the supported formats for help text.
 ### `hostColumns`
 
 hostColumns is the column order for host rows in Table and CSV output.
+
+### `maxTabularDNSNames`
+
+maxTabularDNSNames caps how many names go in the dns column. A busy host can
+carry hundreds — 1.1.1.1 returns 100, over 3KB once joined — which makes a
+table unreadable and a CSV cell unwieldy. The JSON formats keep all of them.
 
 ### `Record`
 
@@ -678,6 +756,10 @@ write appends to the active writer, remembering the first failure.
 ### `hostRow()`
 
 hostRow flattens a record into the columns declared by hostColumns.
+
+### `truncateList()`
+
+truncateList joins up to limit entries, noting how many were left out.
 
 ---
 

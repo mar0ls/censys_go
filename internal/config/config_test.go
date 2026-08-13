@@ -57,11 +57,11 @@ func TestResolvePrefersEnvOverFile(t *testing.T) {
 	}
 }
 
-// A partially specified source must not shadow a complete one: passing only
-// --org should fall through to the environment rather than half-applying.
-func TestResolveIgnoresIncompleteFlags(t *testing.T) {
+// --org has to win even when the token comes from elsewhere; resolving both
+// fields from a single source would silently discard the flag.
+func TestResolveLayersOrgOverTokenSource(t *testing.T) {
 	isolateHome(t)
-	t.Setenv(EnvOrgID, "env-org")
+	t.Setenv(EnvOrgID, "")
 	t.Setenv(EnvToken, "env-token")
 
 	got, src, err := Resolve("flag-org", "")
@@ -69,10 +69,53 @@ func TestResolveIgnoresIncompleteFlags(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if src != SourceEnv {
-		t.Errorf("source = %q, want %q", src, SourceEnv)
+		t.Errorf("source = %q, want the token's source %q", src, SourceEnv)
 	}
-	if got.OrgID != "env-org" {
-		t.Errorf("OrgID = %q, want env-org", got.OrgID)
+	if got.Token != "env-token" {
+		t.Errorf("Token = %q, want env-token", got.Token)
+	}
+	if got.OrgID != "flag-org" {
+		t.Errorf("OrgID = %q, want the flag to win", got.OrgID)
+	}
+}
+
+// The organization is optional: asset lookups work without one.
+func TestResolveAcceptsTokenWithoutOrg(t *testing.T) {
+	isolateHome(t)
+	t.Setenv(EnvOrgID, "")
+	t.Setenv(EnvToken, "")
+
+	got, src, err := Resolve("", "flag-token")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if src != SourceFlags {
+		t.Errorf("source = %q, want %q", src, SourceFlags)
+	}
+	if got.OrgID != "" {
+		t.Errorf("OrgID = %q, want empty", got.OrgID)
+	}
+}
+
+// A stored organization still applies when the token arrives from the
+// environment, which is the shape of a CI run against a saved config.
+func TestResolveTakesOrgFromFileWhenTokenFromEnv(t *testing.T) {
+	isolateHome(t)
+	if err := Save(Credentials{OrgID: "file-org", Token: "file-token"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	t.Setenv(EnvOrgID, "")
+	t.Setenv(EnvToken, "env-token")
+
+	got, src, err := Resolve("", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if src != SourceEnv || got.Token != "env-token" {
+		t.Errorf("token = %q from %q, want env-token from environment", got.Token, src)
+	}
+	if got.OrgID != "file-org" {
+		t.Errorf("OrgID = %q, want file-org", got.OrgID)
 	}
 }
 
@@ -152,7 +195,9 @@ func TestValidate(t *testing.T) {
 	}{
 		{"complete", Credentials{OrgID: "o", Token: "t"}, false},
 		{"missing token", Credentials{OrgID: "o"}, true},
-		{"missing org", Credentials{Token: "t"}, true},
+		// The API accepts asset lookups with no organization, so the token
+		// alone is enough to start.
+		{"token only", Credentials{Token: "t"}, false},
 		{"empty", Credentials{}, true},
 	}
 	for _, tc := range tests {

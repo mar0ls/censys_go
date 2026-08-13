@@ -42,20 +42,17 @@ const (
 // ErrNotConfigured is returned by Resolve when no source supplied credentials.
 var ErrNotConfigured = errors.New("no credentials found in flags, environment, or config file")
 
-// Validate reports whether both fields are populated.
+// Validate reports whether the credentials are usable.
+//
+// Only the token is required. Asset lookups work without an organization —
+// verified against the API, where a host lookup with no organization_id
+// succeeds. Search does require one, and reports that itself with a clearer
+// message than anything guessable here.
 func (c Credentials) Validate() error {
-	if c.OrgID == "" {
-		return errors.New("organization ID cannot be empty")
-	}
 	if c.Token == "" {
 		return errors.New("bearer token cannot be empty")
 	}
 	return nil
-}
-
-// complete reports whether both fields are set, without allocating an error.
-func (c Credentials) complete() bool {
-	return c.OrgID != "" && c.Token != ""
 }
 
 // Redacted returns a copy safe to print or serialize in diagnostics.
@@ -121,36 +118,56 @@ func FromEnv() Credentials {
 	}
 }
 
-// Resolve picks credentials from the first source that supplies both fields:
-// explicit flags, then the environment, then the config file.
+// Resolve assembles credentials from flags, the environment, and the config
+// file, in that order of precedence.
+//
+// The two fields are resolved independently, so a token from the environment
+// combines with an organization from --org. Taking both from whichever single
+// source happened to carry a token would silently discard the flag. The
+// reported Source is where the token came from, since that is the part that
+// authenticates.
 //
 // Nothing is written to disk here. Credentials supplied through the environment
 // stay in the process; persisting them would leak the token onto the filesystem
 // of every CI runner and container that sets CENSYS_TOKEN.
 func Resolve(flagOrgID, flagToken string) (Credentials, Source, error) {
-	fromFlags := Credentials{
-		OrgID: strings.TrimSpace(flagOrgID),
-		Token: strings.TrimSpace(flagToken),
-	}
-	if fromFlags.complete() {
-		return fromFlags, SourceFlags, nil
-	}
-
-	if env := FromEnv(); env.complete() {
-		return env, SourceEnv, nil
+	layers := []struct {
+		creds  Credentials
+		source Source
+	}{
+		{Credentials{OrgID: strings.TrimSpace(flagOrgID), Token: strings.TrimSpace(flagToken)}, SourceFlags},
+		{FromEnv(), SourceEnv},
 	}
 
 	stored, err := Load()
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Credentials{}, SourceNone, ErrNotConfigured
-		}
+	switch {
+	case err == nil:
+		layers = append(layers, struct {
+			creds  Credentials
+			source Source
+		}{stored, SourceFile})
+	case !errors.Is(err, os.ErrNotExist):
 		return Credentials{}, SourceNone, err
 	}
-	if err := stored.Validate(); err != nil {
-		return Credentials{}, SourceNone, fmt.Errorf("stored credentials are unusable: %w", err)
+
+	var (
+		resolved Credentials
+		source   = SourceNone
+	)
+	for _, layer := range layers {
+		if resolved.Token == "" && layer.creds.Token != "" {
+			resolved.Token = layer.creds.Token
+			source = layer.source
+		}
+		if resolved.OrgID == "" {
+			resolved.OrgID = layer.creds.OrgID
+		}
 	}
-	return stored, SourceFile, nil
+
+	if err := resolved.Validate(); err != nil {
+		return Credentials{}, SourceNone, ErrNotConfigured
+	}
+	return resolved, source, nil
 }
 
 // homeDir resolves the user's home directory, falling back to the conventional

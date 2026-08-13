@@ -59,6 +59,11 @@ func FormatNames() string {
 // hostColumns is the column order for host rows in Table and CSV output.
 var hostColumns = []string{"ip", "asn", "as_name", "country", "ports", "software", "cert_sha256", "jarm", "dns"}
 
+// maxTabularDNSNames caps how many names go in the dns column. A busy host can
+// carry hundreds — 1.1.1.1 returns 100, over 3KB once joined — which makes a
+// table unreadable and a CSV cell unwieldy. The JSON formats keep all of them.
+const maxTabularDNSNames = 3
+
 // Record is one result in both of the shapes the formats need: Doc for the JSON
 // encodings, Columns and Values for the tabular ones.
 type Record struct {
@@ -278,6 +283,14 @@ func hostRow(rec censysx.HostRecord) []string {
 		strings.Join(products, "; "),
 		strings.Join(rec.CertHashes(), ","),
 		strings.Join(rec.JARMHashes(), ","),
-		strings.Join(rec.DNSNames, ","),
+		truncateList(rec.DNSNames, maxTabularDNSNames),
 	}
+}
+
+// truncateList joins up to limit entries, noting how many were left out.
+func truncateList(values []string, limit int) string {
+	if len(values) <= limit {
+		return strings.Join(values, ",")
+	}
+	return fmt.Sprintf("%s (+%d more)", strings.Join(values[:limit], ","), len(values)-limit)
 }

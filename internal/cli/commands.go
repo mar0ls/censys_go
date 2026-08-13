@@ -186,7 +186,7 @@ func commands() []command {
 					return err
 				}
 				stream := s.stream()
-				if err := stream.Value(cert); err != nil {
+				if err := stream.Record(render.Certificate(cert)); err != nil {
 					_ = stream.Close()
 					return err
 				}
@@ -237,28 +237,21 @@ func commands() []command {
 				fs.IntVar(&days, "days", 30, "usage window in days")
 			},
 			run: func(ctx context.Context, s *session, _ []string) error {
-				credits, err := s.client.Credits(ctx)
+				balance, err := s.client.Balance(ctx)
 				if err != nil {
 					return err
 				}
-				payload := map[string]any{"balance": credits.GetBalance()}
-				if exp := censysx.NextExpiry(credits); exp != nil {
-					payload["expires_at"] = exp.ExpiresAt.Format(time.RFC3339)
-					payload["expiring_balance"] = exp.Balance
-				}
 
-				if usage, err := s.client.CreditUsage(ctx, days); err != nil {
+				// The usage report is organization-scoped; a user wallet has no
+				// equivalent, so its absence is not an error worth failing on.
+				usage, err := s.client.CreditUsage(ctx, days)
+				if err != nil {
 					s.warnf("usage report unavailable: %s", censysx.Explain(err))
-				} else {
-					payload["window_days"] = days
-					payload["consumed"] = usage.TotalConsumed
-					payload["transactions"] = usage.TransactionCount
-					payload["consumed_api"] = usage.CreditsConsumedBySource.API
-					payload["consumed_ui"] = usage.CreditsConsumedBySource.UI
+					usage = nil
 				}
 
 				stream := s.stream()
-				if err := stream.Value(payload); err != nil {
+				if err := stream.Record(render.BalanceRow(balance, usage, days)); err != nil {
 					_ = stream.Close()
 					return err
 				}
@@ -328,8 +321,13 @@ func runHosts(ctx context.Context, s *session, targets []string, at *time.Time) 
 	s.infof("%d hosts to fetch in %d request(s), 1 credit each", len(targets), batches)
 
 	stream := s.stream()
+	passive := 0
 	found, missing, err := s.client.HostsEach(ctx, targets, at, func(host components.Host) error {
-		return stream.Host(censysx.NewHostRecord(&host))
+		rec := censysx.NewHostRecord(&host)
+		if !rec.Scanned() {
+			passive++
+		}
+		return stream.Host(rec)
 	})
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
@@ -343,7 +341,19 @@ func runHosts(ctx context.Context, s *session, targets []string, at *time.Time) 
 	}
 
 	s.okf("%d hosts written, %d not present in Censys", found, missing)
+	reportPassive(s, passive, found)
 	return nil
+}
+
+// reportPassive flags records with no services. Censys answers for almost any
+// address, sometimes with nothing but DNS and sometimes with routing data but
+// no scan, so a target list that is mostly serviceless is a sign the list was
+// wrong rather than that the hosts are quiet.
+func reportPassive(s *session, passive, total int) {
+	if passive == 0 {
+		return
+	}
+	s.warnf("%d of %d have no scanned services", passive, total)
 }
 
 // runHostsOneByOne fetches each target separately. It costs the same in credits
@@ -353,7 +363,7 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 	s.infof("%d hosts to fetch, one request each, 1 credit each", len(targets))
 
 	stream := s.stream()
-	fetched, failed := 0, 0
+	fetched, failed, passive := 0, 0, 0
 	interrupted := false
 
 	for _, target := range targets {
@@ -384,7 +394,11 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 			continue
 		}
 
-		if err := stream.Host(censysx.NewHostRecord(host)); err != nil {
+		rec := censysx.NewHostRecord(host)
+		if !rec.Scanned() {
+			passive++
+		}
+		if err := stream.Host(rec); err != nil {
 			_ = stream.Close()
 			return err
 		}
@@ -395,6 +409,7 @@ func runHostsOneByOne(ctx context.Context, s *session, targets []string, at *tim
 		return err
 	}
 	s.okf("%d hosts written, %d failed", fetched, failed)
+	reportPassive(s, passive, fetched)
 	if interrupted {
 		return ctx.Err()
 	}
