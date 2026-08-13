@@ -1,0 +1,67 @@
+name: Release
+
+# Quoted because YAML 1.1 reads a bare `on` as the boolean true, which trips up
+# editor schemas even though GitHub itself accepts either form.
+"on":
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: test
+        run: go test -race -cover ./...
+
+      - name: build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+                        windows/amd64 windows/arm64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            name="censys_go-${goos}-${goarch}"
+            if [ "$goos" = windows ]; then
+              bin=censys_go.exe
+            else
+              bin=censys_go
+            fi
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${bin}" .
+            if [ "$goos" = windows ]; then
+              (cd dist && zip -q "${name}.zip" "$bin" && rm "$bin")
+            else
+              tar -czf "dist/${name}.tar.gz" -C dist "$bin"
+              rm "dist/${bin}"
+            fi
+          done
+          (cd dist && sha256sum ./* > SHA256SUMS)
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A suffixed tag, v0.9.0-rc1, ships as a pre-release.
+          case "$VERSION" in
+            *-*) prerelease=--prerelease ;;
+            *)   prerelease= ;;
+          esac
+          gh release create "$VERSION" dist/* \
+            --title "$VERSION" \
+            --generate-notes \
+            ${prerelease:+"$prerelease"}
