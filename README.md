@@ -68,6 +68,7 @@ Verified against the live API:
 | Command | Without an organization |
 |---|---|
 | `host`, `cert`, `timeline` | works |
+| `credits` | works, reporting the user wallet instead of an organization balance |
 | `search`, `aggregate` | `403` — and free accounts cannot use these over the API at all, only through the web UI |
 | `cert-hosts` | `422 Missing organization ID` |
 
@@ -179,9 +180,24 @@ to a large sweep.
 
 `ndjson` (the default) writes one JSON document per line: it streams, it
 survives truncation, and `jq` and DuckDB read it directly. `json` writes a
-single array, `table` aligned columns for reading, and `csv` a header row plus
-one row per host with the fields worth eyeballing — address, ASN, country,
-ports, software, certificate hash, JARM, and DNS names.
+single array.
+
+`table` and `csv` project each result onto columns chosen for the record type:
+hosts show address, ASN, country, ports, software, certificate hash, JARM and
+DNS names; certificates show subject, issuer, validity, `self_signed` and
+`ja4x`; observations show the host, port and the window it was seen in. The
+JSON formats always carry the full record — a certificate is around 8KB of CT
+log entries and lint results, which is not what a column is for. Long lists are
+truncated in the tabular formats only: `1.1.1.1` carries 100 DNS names.
+
+### Reading the results
+
+Censys answers for almost any address, so a record coming back does not mean
+the host is live. `240.0.0.1` is not even routable and still returns 73 DNS
+names; an unscanned address inside a live prefix returns routing and location
+but no services. Any command that fetches hosts reports how many of them had no
+scanned services, which is usually a sign the target list was wrong rather than
+that the hosts are quiet.
 
 ## Development
 

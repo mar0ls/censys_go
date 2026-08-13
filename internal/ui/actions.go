@@ -39,15 +39,18 @@ var exampleQueries = []string{
 }
 
 func (u *UI) credits(ctx context.Context) error {
-	credits, err := u.client.Credits(ctx)
+	balance, err := u.client.Balance(ctx)
 	if err != nil {
 		return err
 	}
 
-	u.printf("\n=== Credits ===\n")
-	u.printf("  Balance : %d\n", credits.GetBalance())
-	if exp := censysx.NextExpiry(credits); exp != nil {
-		u.printf("  Expires : %s (%d credits)\n", exp.ExpiresAt.Format(time.DateOnly), exp.Balance)
+	u.printf("\n=== Credits (%s) ===\n", balance.Scope)
+	u.printf("  Balance : %d\n", balance.Credits)
+	if balance.Renews != nil {
+		u.printf("  Renews  : %s\n", balance.Renews.Format(time.DateOnly))
+	}
+	if balance.Expires != nil {
+		u.printf("  Expires : %s\n", balance.Expires.Format(time.DateOnly))
 	}
 
 	usage, err := u.client.CreditUsage(ctx, usageWindowDays)
@@ -293,9 +296,14 @@ func (u *UI) bulkFetch(ctx context.Context, targets []string) error {
 	)
 
 	stream := u.stream()
+	passive := 0
 	found, missing, err := u.client.HostsEach(ctx, targets, nil, func(host components.Host) error {
 		_ = bar.Add(1)
-		return stream.Host(censysx.NewHostRecord(&host))
+		rec := censysx.NewHostRecord(&host)
+		if !rec.Scanned() {
+			passive++
+		}
+		return stream.Host(rec)
 	})
 	if closeErr := stream.Close(); err == nil {
 		err = closeErr
@@ -311,6 +319,9 @@ func (u *UI) bulkFetch(ctx context.Context, targets []string) error {
 	}
 
 	u.okf("%d hosts written, %d not present in Censys", found, missing)
+	if passive > 0 {
+		u.warnf("%d of %d have no scanned services", passive, found)
+	}
 	return nil
 }
 
@@ -447,7 +458,7 @@ func (u *UI) certificate(ctx context.Context) error {
 	}
 
 	stream := u.stream()
-	if err := stream.Value(cert); err != nil {
+	if err := stream.Record(render.Certificate(cert)); err != nil {
 		_ = stream.Close()
 		return err
 	}

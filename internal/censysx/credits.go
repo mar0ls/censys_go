@@ -11,6 +11,43 @@ import (
 	sdktypes "github.com/censys/censys-sdk-go/types"
 )
 
+// Balance is a credit balance from either the organization or the user wallet,
+// whichever applies to the configured credentials.
+type Balance struct {
+	Credits int64      `json:"balance"`
+	Scope   string     `json:"scope"`
+	Renews  *time.Time `json:"renews_at,omitempty"`
+	Expires *time.Time `json:"expires_at,omitempty"`
+}
+
+// Balance returns the credit balance, reading the user wallet when no
+// organization is configured. The organization endpoint needs an organization
+// ID, so without this a token-only account could not see its balance at all,
+// even though /v3/accounts/users/credits answers for exactly that case.
+func (c *Client) Balance(ctx context.Context) (*Balance, error) {
+	if c.orgID == "" {
+		resp, err := c.sdk.AccountManagement.GetUserCredits(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("fetching user credits: %w", err)
+		}
+		result := resp.GetResponseEnvelopeUserCredits().GetResult()
+		if result == nil {
+			return nil, errors.New("user credits: response carried no result")
+		}
+		return &Balance{Credits: result.GetBalance(), Scope: "user", Renews: result.GetResetsAt()}, nil
+	}
+
+	credits, err := c.Credits(ctx)
+	if err != nil {
+		return nil, err
+	}
+	balance := &Balance{Credits: credits.GetBalance(), Scope: "organization"}
+	if exp := NextExpiry(credits); exp != nil {
+		balance.Expires = exp.ExpiresAt
+	}
+	return balance, nil
+}
+
 // Credits returns the organization's current credit balance.
 func (c *Client) Credits(ctx context.Context) (*components.OrganizationCredits, error) {
 	resp, err := c.sdk.AccountManagement.GetOrganizationCredits(ctx,
