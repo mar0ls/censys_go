@@ -44,11 +44,14 @@ Or run it straight from source with `go run .`.
 
 ## Configuration
 
-Credentials are resolved from the first source that supplies both values:
+The token and the organization are resolved independently, each from the first
+source that supplies it:
 
 1. `--org` and `--token` flags
 2. `CENSYS_ORG` and `CENSYS_TOKEN` environment variables
 3. `$HOME/.censys/config.json` (mode `0600`)
+
+So a token in the environment combines with `--org` on the command line.
 
 ```bash
 export CENSYS_ORG="your_org_id"
@@ -58,6 +61,21 @@ export CENSYS_TOKEN="your_token"
 Credentials taken from the environment stay in the process — they are never
 written to disk. To store them, run `censys_go` with no arguments and use
 **Configure credentials** in the menu.
+
+**The organization is optional, but only some commands work without it.**
+Verified against the live API:
+
+| Command | Without an organization |
+|---|---|
+| `host`, `cert`, `timeline` | works |
+| `search`, `aggregate` | `403` — and free accounts cannot use these over the API at all, only through the web UI |
+| `cert-hosts` | `422 Missing organization ID` |
+
+### Slow endpoints
+
+`timeline` is slow: a seven-day window on a busy host takes around 30 seconds,
+and the default 60 second budget is not always enough. Raise it with `--timeout`
+or narrow the window with `--since`.
 
 ## Usage
 

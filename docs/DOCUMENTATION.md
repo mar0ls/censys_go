@@ -221,6 +221,7 @@ Files: `asset.go`, `batch.go`, `client.go`, `credits.go`, `errors.go`, `model.go
 | `StatusOf()` | StatusOf returns the HTTP status carried by err, or 0 if it carries none. |
 | `IsAuth()` | IsAuth reports whether err is a credential problem rather than a transient one. |
 | `IsNotFound()` | IsNotFound reports whether the requested asset is simply absent from Censys. |
+| `problemDocument` | problemDocument is the RFC 9457 shape the API returns on error. |
 | `Explain()` | Explain renders err for a human, unwrapping the SDK's JSON-blob error strings |
 | `HostRecord` | HostRecord is a flattened view of a host, holding the fields worth putting in |
 | `ServiceRecord` | ServiceRecord is one exposed service, reduced to the fields that identify it |
@@ -336,6 +337,10 @@ IsAuth reports whether err is a credential problem rather than a transient one.
 ### `IsNotFound()`
 
 IsNotFound reports whether the requested asset is simply absent from Censys.
+
+### `problemDocument`
+
+problemDocument is the RFC 9457 shape the API returns on error.
 
 ### `Explain()`
 
@@ -482,14 +487,13 @@ Files: `config.go`
 | `Credentials` | Credentials identify an organization and the token used to act on its behalf. |
 | `Source` | Source records where a set of credentials came from, so the CLI can report it |
 | `ErrNotConfigured` | ErrNotConfigured is returned by Resolve when no source supplied credentials. |
-| `Credentials.Validate()` | Validate reports whether both fields are populated. |
-| `Credentials.complete()` | complete reports whether both fields are set, without allocating an error. |
+| `Credentials.Validate()` | Validate reports whether the credentials are usable. |
 | `Credentials.Redacted()` | Redacted returns a copy safe to print or serialize in diagnostics. |
 | `Path()` | Path returns the absolute path of the credential file. |
 | `Load()` | Load reads credentials from disk. A missing file is reported as os.ErrNotExist, |
 | `Save()` | Save writes credentials to disk with owner-only permissions. |
 | `FromEnv()` | FromEnv reads credentials from the environment. Unset variables yield empty |
-| `Resolve()` | Resolve picks credentials from the first source that supplies both fields: |
+| `Resolve()` | Resolve assembles credentials from flags, the environment, and the config |
 | `homeDir()` | homeDir resolves the user's home directory, falling back to the conventional |
 
 ### `Dir`
@@ -519,11 +523,12 @@ ErrNotConfigured is returned by Resolve when no source supplied credentials.
 
 ### `Credentials.Validate()`
 
-Validate reports whether both fields are populated.
+Validate reports whether the credentials are usable.
 
-### `Credentials.complete()`
-
-complete reports whether both fields are set, without allocating an error.
+Only the token is required. Asset lookups work without an organization —
+verified against the API, where a host lookup with no organization_id
+succeeds. Search does require one, and reports that itself with a clearer
+message than anything guessable here.
 
 ### `Credentials.Redacted()`
 
@@ -549,8 +554,14 @@ fields rather than an error, so the result can be layered under other sources.
 
 ### `Resolve()`
 
-Resolve picks credentials from the first source that supplies both fields:
-explicit flags, then the environment, then the config file.
+Resolve assembles credentials from flags, the environment, and the config
+file, in that order of precedence.
+
+The two fields are resolved independently, so a token from the environment
+combines with an organization from --org. Taking both from whichever single
+source happened to carry a token would silently discard the flag. The
+reported Source is where the token came from, since that is the part that
+authenticates.
 
 Nothing is written to disk here. Credentials supplied through the environment
 stay in the process; persisting them would leak the token onto the filesystem
@@ -584,6 +595,7 @@ Files: `records.go`, `render.go`
 | `ParseFormat()` | ParseFormat validates a format name. |
 | `FormatNames()` | FormatNames renders the supported formats for help text. |
 | `hostColumns` | hostColumns is the column order for host rows in Table and CSV output. |
+| `maxTabularDNSNames` | maxTabularDNSNames caps how many names go in the dns column. A busy host can |
 | `Record` | Record is one result in both of the shapes the formats need: Doc for the JSON |
 | `Stream` | Stream writes records incrementally in one format. Callers must call Close to |
 | `NewStream()` | NewStream starts a stream in the given format. |
@@ -595,6 +607,7 @@ Files: `records.go`, `render.go`
 | `Stream.writeRow()` | writeRow emits one tabular row in whichever of CSV or Table is active. |
 | `Stream.write()` | write appends to the active writer, remembering the first failure. |
 | `hostRow()` | hostRow flattens a record into the columns declared by hostColumns. |
+| `truncateList()` | truncateList joins up to limit entries, noting how many were left out. |
 
 ### `Observation()`
 
@@ -626,6 +639,12 @@ FormatNames renders the supported formats for help text.
 ### `hostColumns`
 
 hostColumns is the column order for host rows in Table and CSV output.
+
+### `maxTabularDNSNames`
+
+maxTabularDNSNames caps how many names go in the dns column. A busy host can
+carry hundreds — 1.1.1.1 returns 100, over 3KB once joined — which makes a
+table unreadable and a CSV cell unwieldy. The JSON formats keep all of them.
 
 ### `Record`
 
@@ -678,6 +697,10 @@ write appends to the active writer, remembering the first failure.
 ### `hostRow()`
 
 hostRow flattens a record into the columns declared by hostColumns.
+
+### `truncateList()`
+
+truncateList joins up to limit entries, noting how many were left out.
 
 ---
 
