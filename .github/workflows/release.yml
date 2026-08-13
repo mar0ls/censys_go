@@ -13,6 +13,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # Runtime security sensor. Has to be the first step: it only sees what
+      # runs after it starts, and this job is the one that signs off on the
+      # binaries people download.
+      - uses: cicd-sensor/cicd-sensor-action@6511eb44c91d71b2b93d71193b1bf2cb18352f66 # v0.0.38
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
