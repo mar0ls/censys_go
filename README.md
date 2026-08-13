@@ -1,5 +1,8 @@
 # Censys-Go CLI
 
+[![CI](https://github.com/mar0ls/censys_go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mar0ls/censys_go/actions/workflows/ci.yml)
+[![Release](https://github.com/mar0ls/censys_go/actions/workflows/release.yml/badge.svg)](https://github.com/mar0ls/censys_go/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/mar0ls/censys_go?style=flat&logo=github&sort=semver)](https://github.com/mar0ls/censys_go/releases/latest)
 [![Go version](https://img.shields.io/badge/go-1.25%2B-00ADD8?style=flat&logo=go)](https://golang.org/doc/install)
 [![Docs](https://img.shields.io/badge/docs-generated-blueviolet?style=flat&logo=markdown)](docs/DOCUMENTATION.md)
 
@@ -41,6 +44,10 @@ make build          # produces ./censys_go
 ```
 
 Or run it straight from source with `go run .`.
+
+Tagged versions ship binaries for linux, darwin and windows on amd64 and arm64,
+with a `SHA256SUMS` to check them against, on the
+[releases page](https://github.com/mar0ls/censys_go/releases).
 
 ## Configuration
 
